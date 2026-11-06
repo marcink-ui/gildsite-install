@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# Gildsite installer. Run by an AI on the server, which talks to the person (see INSTALL-FOR-AI.md).
+# Read-only commands: check, plan, status, dns. Everything that changes the server needs `consent yes` first.
+set -euo pipefail
+umask 077
+
+VERSION="0.1.0"
+GILDSITE_HOME="${GILDSITE_HOME:-/srv/gildsite}"
+STATE_DIR="${GILDSITE_STATE_DIR:-$GILDSITE_HOME/.install}"
+ANSWERS="$STATE_DIR/answers.env"
+CONSENT="$STATE_DIR/consent"
+DONE_DIR="$STATE_DIR/done"
+
+# Until ready-made Docker images exist, the panel is built on the server; that build needs about 8 GB of memory.
+MIN_RAM_GB="${MIN_RAM_GB:-8}"
+MIN_DISK_GB="${MIN_DISK_GB:-30}"
+
+STEPS=(
+  "check|Look at the server (memory, disk, ports, Docker)"
+  "answers|Save the website address, owner e-mail and company name"
+  "consent|Get the person's yes for the plan"
+  "dns|Point the address to this server"
+  "run|Install and start Gildsite in Docker, HTTPS, nightly backups"
+  "aurelius|Connect Aurelius to the AI on this server (optional)"
+  "github|Connect GitHub for issues and pull requests (optional)"
+  "finish|Check everything answers, give the owner a login link"
+)
+
+# ---------- helpers ----------
+say()   { printf '%s\n' "$*"; }
+ok()    { printf '  OK    %s\n' "$*"; }
+warn()  { printf '  WARN  %s\n' "$*"; }
+bad()   { printf '  FAIL  %s\n' "$*"; }
+die()   { printf 'ERROR: %s\nFIX: %s\n' "$1" "${2:-Run ./gildsite-install status and tell the person what is missing.}" >&2; exit "${3:-1}"; }
+have()  { command -v "$1" >/dev/null 2>&1; }
+
+load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; PANEL_DOMAIN="${PANEL_DOMAIN:-}"; DESIGN="${DESIGN:-off}"; RELEASE="${RELEASE:-latest}"; }
+panel_domain() { [ -n "$PANEL_DOMAIN" ] && echo "$PANEL_DOMAIN" || echo "panel.${DOMAIN#www.}"; }
+need_consent() { [ -f "$CONSENT" ] || die "The person has not agreed to the plan yet." "Run ./gildsite-install plan, explain it, and after a clear yes run ./gildsite-install consent yes." 2; }
+mark_done() { mkdir -p "$DONE_DIR"; date -u +%FT%TZ > "$DONE_DIR/$1"; }
+is_done() { [ -f "$DONE_DIR/$1" ]; }
+
+ram_gb()  { awk '/MemTotal/ {printf "%d", $2/1024/1024 + 0.5}' /proc/meminfo 2>/dev/null || echo 0; }
+disk_gb() { local p="$GILDSITE_HOME"; while [ ! -d "$p" ]; do p=$(dirname "$p"); done; df -BG --output=avail "$p" | tail -1 | tr -dc 0-9; }
+port_busy() { have ss && ss -ltnH "( sport = :$1 )" 2>/dev/null | grep -q .; }
+public_ip() { curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || { hostname -I 2>/dev/null || true; } | awk '{print $1}'; }
+resolve() { { getent ahostsv4 "$1" 2>/dev/null || true; } | awk 'NR==1 {print $1}'; }
+
+# ---------- commands ----------
+cmd_check() {
+  local fails=0 json="${1:-}"
+  local os="unknown" arch ram disk
+  [ -f /etc/os-release ] && os=$(. /etc/os-release; echo "$ID $VERSION_ID")
+  arch=$(uname -m); ram=$(ram_gb); disk=$(disk_gb)
+  local ais=() a; for a in claude codex gemini opencode; do have "$a" && ais+=("$a"); done
+
+  if [ "$json" = "--json" ]; then
+    printf '{"os":"%s","arch":"%s","ram_gb":%s,"disk_free_gb":%s,"docker":%s,"port80_busy":%s,"port443_busy":%s,"root":%s,"ai_clients":"%s","gh":%s}\n' \
+      "$os" "$arch" "$ram" "$disk" "$(have docker && echo true || echo false)" \
+      "$(port_busy 80 && echo true || echo false)" "$(port_busy 443 && echo true || echo false)" \
+      "$([ "$(id -u)" = 0 ] && echo true || echo false)" "${ais[*]:-}" "$(have gh && echo true || echo false)"
+    return 0
+  fi
+
+  say "Gildsite installer $VERSION: server check (nothing is changed)"
+  case "$os" in ubuntu*|debian*) ok "System: $os" ;; *) warn "System: $os (tested on Ubuntu and Debian)";; esac
+  case "$arch" in x86_64|aarch64) ok "Processor: $arch" ;; *) bad "Processor: $arch is not supported"; fails=$((fails+1));; esac
+  if [ "$ram" -ge "$MIN_RAM_GB" ]; then ok "Memory: ${ram} GB"; else bad "Memory: ${ram} GB, needs at least ${MIN_RAM_GB} GB"; fails=$((fails+1)); fi
+  if [ "$disk" -ge "$MIN_DISK_GB" ]; then ok "Free disk: ${disk} GB"; else bad "Free disk: ${disk} GB, needs at least ${MIN_DISK_GB} GB"; fails=$((fails+1)); fi
+  if [ "$(id -u)" = 0 ] || (have sudo && sudo -n true 2>/dev/null); then ok "Admin rights: yes"; else bad "Admin rights: no (run as root or with sudo)"; fails=$((fails+1)); fi
+  if have docker; then ok "Docker: $(docker --version 2>/dev/null | cut -d, -f1)"; else warn "Docker: not installed yet (the installer will add it)"; fi
+  local p; for p in 80 443; do
+    if port_busy "$p"; then warn "Port $p is used by another program. The installer will not take it over; it will ask what to do."; else ok "Port $p: free"; fi
+  done
+  if [ ${#ais[@]} -gt 0 ]; then ok "AI on this server: ${ais[*]} (Aurelius can connect to it)"; else warn "AI on this server: none found (Aurelius can still use an API key in the panel)"; fi
+  if have gh; then ok "GitHub tool: installed"; else warn "GitHub tool: not installed (optional, the installer can add it)"; fi
+  say ""
+  if [ "$fails" -eq 0 ]; then say "READY: the server can run Gildsite."; else say "NOT READY: $fails problem(s) above."; return 1; fi
+}
+
+cmd_answer() {
+  local key="${1:-}" val="${2:-}"
+  case "$key" in
+    DOMAIN) echo "$val" | grep -Eq '^([a-z0-9-]+\.)+[a-z]{2,}$' || die "\"$val\" does not look like a website address." "Ask for an address like www.company.com (no https://, no slash)." ;;
+    PANEL_DOMAIN) echo "$val" | grep -Eq '^([a-z0-9-]+\.)+[a-z]{2,}$' || die "\"$val\" does not look like an address." "Use something like panel.company.com." ;;
+    OWNER_EMAIL) echo "$val" | grep -Eq '^[^@ ]+@[^@ ]+\.[^@ ]+$' || die "\"$val\" does not look like an e-mail." "Ask for the owner's e-mail again." ;;
+    COMPANY) [ -n "$val" ] || die "Company name is empty." "Ask for the company name." ;;
+    DESIGN) case "$val" in on|off) ;; *) die "DESIGN must be on or off." "Use: answer DESIGN on";; esac ;;
+    RELEASE) [ -n "$val" ] || die "RELEASE is empty." "Use a release tag like v1.2.0, or latest." ;;
+    *) die "Unknown answer \"$key\"." "Use one of: DOMAIN, OWNER_EMAIL, COMPANY, PANEL_DOMAIN, DESIGN, RELEASE." ;;
+  esac
+  mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"; touch "$ANSWERS"; chmod 600 "$ANSWERS"
+  grep -v "^$key=" "$ANSWERS" > "$ANSWERS.tmp" || true
+  printf '%s=%q\n' "$key" "$val" >> "$ANSWERS.tmp"; chmod 600 "$ANSWERS.tmp"; mv "$ANSWERS.tmp" "$ANSWERS"
+  # A new answer after consent changes the plan, so the person has to agree again.
+  [ -f "$CONSENT" ] && rm -f "$CONSENT" && say "The plan changed, so the earlier yes no longer counts. Show the plan again."
+  say "Saved $key."
+}
+
+cmd_plan() {
+  load_answers
+  local missing=()
+  [ -n "$DOMAIN" ] || missing+=(DOMAIN); [ -n "$OWNER_EMAIL" ] || missing+=(OWNER_EMAIL); [ -n "$COMPANY" ] || missing+=(COMPANY)
+  [ ${#missing[@]} -eq 0 ] || die "Missing answers: ${missing[*]}." "Ask the person and save each with ./gildsite-install answer KEY VALUE."
+  cat <<PLAN
+PLAN (nothing has been changed yet)
+
+Website:  https://$DOMAIN
+Panel:    https://$(panel_domain)
+Owner:    $OWNER_EMAIL
+Company:  $COMPANY
+
+What will happen on this server:
+  1. Install Docker (if missing) and create the folder $GILDSITE_HOME.
+  2. Download Gildsite release "$RELEASE" from GitHub.
+  3. Start in Docker: website, panel, database, search, Aurelius engine$( [ "$DESIGN" = on ] && echo ", Design" ).
+  4. Start the web server (Caddy) with HTTPS certificates for both addresses.
+  5. Allow only ports 22, 80 and 443 from outside. Everything else stays inside the server.
+  6. Turn on a nightly backup of the database and photos (kept 7 days).
+  7. Create the owner account for $OWNER_EMAIL.
+
+What will NOT happen:
+  - No other programs or websites on this server are changed or stopped.
+  - No passwords or keys are shown in the chat; they are stored in files only root can read.
+
+Optional after install (asked separately): connect Aurelius to the AI on this server, connect GitHub.
+PLAN
+}
+
+cmd_consent() {
+  [ "${1:-}" = yes ] || die "Consent must be given as: consent yes" "Only run this after the person clearly said yes to the plan."
+  cmd_plan >/dev/null
+  mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
+  { date -u +%FT%TZ; sha256sum "$ANSWERS" | cut -d' ' -f1; } > "$CONSENT"
+  say "Consent recorded. Next: ./gildsite-install dns"
+}
+
+cmd_dns() {
+  load_answers
+  [ -n "$DOMAIN" ] || die "No website address yet." "Run ./gildsite-install answer DOMAIN <address> first."
+  local ip; ip=$(public_ip)
+  [ -n "$ip" ] || die "Could not find this server's public address." "Ask the person for the server's IP address (it is in their hosting panel)."
+  local pd; pd=$(panel_domain)
+  say "Add these records at the domain provider (DNS settings):"
+  say "  Type A   Name: $DOMAIN   Value: $ip"
+  say "  Type A   Name: $pd   Value: $ip"
+  say ""
+  local all=1 h got
+  for h in "$DOMAIN" "$pd"; do
+    got=$(resolve "$h")
+    if [ "$got" = "$ip" ]; then ok "$h points to this server"; else warn "$h ${got:+points to $got}${got:-is not set yet}"; all=0; fi
+  done
+  if [ "$all" = 1 ]; then mark_done dns; say "DNS READY. Next: ./gildsite-install run"; else say "Waiting for DNS. New records usually work within 5–30 minutes. Run this again in a minute or two."; return 4; fi
+}
+
+cmd_not_yet() {
+  need_consent
+  die "Step \"$1\" is not built yet in installer $VERSION (skeleton)." "Tell the person the installer is still being built; nothing was changed." 3
+}
+
+cmd_status() {
+  load_answers
+  say "Gildsite installer $VERSION: status"
+  local i=1 s name desc mark
+  for s in "${STEPS[@]}"; do
+    name=${s%%|*}; desc=${s#*|}; mark="[ ]"
+    case "$name" in
+      check)   ( cmd_check >/dev/null 2>&1 ) && mark="[x]" ;;
+      answers) [ -n "$DOMAIN" ] && [ -n "$OWNER_EMAIL" ] && [ -n "$COMPANY" ] && mark="[x]" ;;
+      consent) [ -f "$CONSENT" ] && mark="[x]" ;;
+      *)       is_done "$name" && mark="[x]" ;;
+    esac
+    printf '  %s %d. %s\n' "$mark" "$i" "$desc"; i=$((i+1))
+  done
+}
+
+usage() {
+  cat <<USE
+Gildsite installer $VERSION. Read INSTALL-FOR-AI.md first.
+
+  check [--json]        look at the server (read-only)
+  answer KEY VALUE      save DOMAIN, OWNER_EMAIL, COMPANY (also PANEL_DOMAIN, DESIGN on|off, RELEASE)
+  plan                  show what will happen (read-only)
+  consent yes           record the person's yes (only after they said it)
+  dns                   show DNS records and check them (read-only)
+  run                   install and start everything (needs consent)
+  aurelius              connect Aurelius to the AI on this server (needs consent)
+  github                connect GitHub (needs consent)
+  finish                final check and owner login link (needs consent)
+  status                which steps are done
+USE
+}
+
+case "${1:-}" in
+  check)    shift; cmd_check "${1:-}" ;;
+  answer)   shift; cmd_answer "${1:-}" "${2:-}" ;;
+  plan)     cmd_plan ;;
+  consent)  shift; cmd_consent "${1:-}" ;;
+  dns)      cmd_dns ;;
+  run|aurelius|github|finish) cmd_not_yet "$1" ;;
+  status)   cmd_status ;;
+  version)  say "$VERSION" ;;
+  ""|help|-h|--help) usage ;;
+  *) usage; exit 1 ;;
+esac
