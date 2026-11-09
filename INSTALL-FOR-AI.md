@@ -82,27 +82,34 @@ finished parts are skipped.
 
 ### Step 5. Connect Aurelius to you (optional, recommended)
 
+Ask first: "Shall I connect myself to your new panel, so you can ask me to work on the website?" After a yes:
+
 ```sh
-./gildsite-install aurelius
+./gildsite-install aurelius          # finds Claude Code or Codex by itself
+./gildsite-install aurelius claude   # or name the client: claude, codex, none
 ```
 
-If this server has Claude Code, Codex or another MCP client, the script creates an
-AI Access key in the panel and adds the panel connector to that client, plus the
-Aurelius skill pack. Ask first: "Shall I connect myself to your new panel, so you can
-ask me to work on the website?"
+The script creates an AI Access key in the panel (it can read and write drafts only; a person publishes),
+stores it in a file only root can read, and adds the panel as connector `gildsite` to your client
+(Claude Code: user scope; Codex: `~/.codex/config.toml`). Then tell the person: "Done. Start a new chat with
+me and I will see the panel tools." Never print the key.
 
 Licence rule: a Claude subscription works only inside the person's own Claude Code.
 The chat window inside the panel uses an API key the person enters in the panel.
 
 ### Step 6. Connect GitHub (optional)
 
+Ask first: "Shall I connect GitHub, so feedback from the panel goes there as issues?" Then ask which
+repository (owner/name) and save it:
+
 ```sh
+./gildsite-install answer GITHUB_REPO your-company/website
 ./gildsite-install github
 ```
 
-Ask first: "Shall I connect GitHub, so feedback and code changes can go there as issues
-and pull requests?" The script starts a device login: the person opens a link and types a
-short code. No token goes through the chat.
+It prints `GITHUB=WAITING` and a short code. Tell the person: "Open https://github.com/login/device, sign in,
+type the code <code> and click Authorize." When they say it is done, run `./gildsite-install github` again.
+No token goes through the chat; the panel keeps its own encrypted copy and the installer deletes its copy.
 
 ### Step 7. Finish
 
