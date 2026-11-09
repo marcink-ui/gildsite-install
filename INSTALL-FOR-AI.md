@@ -35,7 +35,7 @@ Ask one at a time and save each answer:
 | "What e-mail should the owner account use?" | `./gildsite-install answer OWNER_EMAIL <email>` |
 | "What is the company name?" | `./gildsite-install answer COMPANY "<name>"` |
 
-The panel gets its own address automatically (`panel.<domain>`); the person can change it later.
+The panel lives on the same address under `/admin` (for example `www.yourcompany.com/admin`).
 
 ### Step 2. Show the plan and ask for consent
 
@@ -56,7 +56,7 @@ Only after a clear yes:
 ./gildsite-install dns
 ```
 
-It prints the records to add at the domain provider. Tell the person exactly where to
+It prints the record to add at the domain provider (one A record; the address without www is optional). Tell the person exactly where to
 click (their provider's DNS settings) and what to type. Then wait: run `./gildsite-install dns`
 again every minute or two until it says the address points to this server.
 
@@ -66,8 +66,17 @@ again every minute or two until it says the address points to this server.
 ./gildsite-install run
 ```
 
+If it stops with "No access to the Gildsite code yet", ask the person for the **download key**
+they received with Gildsite. It is read-only and only for downloading. Save it without showing it:
+
+```sh
+printf '%s' '<key>' | ./gildsite-install key
+```
+
+Then run `./gildsite-install run` again. Never repeat the key back in the chat.
+
 This installs Docker if needed, downloads the Gildsite release, starts everything in
-Docker (website, panel, Design, Aurelius engine, search), sets up the web server with
+Docker (website, panel, database, search), sets up the web server (Caddy) with
 HTTPS, and turns on nightly backups. It can take 15–25 minutes. It is safe to run again:
 finished parts are skipped.
 

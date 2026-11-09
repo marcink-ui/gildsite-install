@@ -4,7 +4,8 @@
 set -euo pipefail
 umask 077
 
-VERSION="0.1.0"
+VERSION="0.2.0"
+INSTALLER_DIR="$(cd "$(dirname "$0")" && pwd)"
 GILDSITE_HOME="${GILDSITE_HOME:-/srv/gildsite}"
 STATE_DIR="${GILDSITE_STATE_DIR:-$GILDSITE_HOME/.install}"
 ANSWERS="$STATE_DIR/answers.env"
@@ -34,8 +35,7 @@ bad()   { printf '  FAIL  %s\n' "$*"; }
 die()   { printf 'ERROR: %s\nFIX: %s\n' "$1" "${2:-Run ./gildsite-install status and tell the person what is missing.}" >&2; exit "${3:-1}"; }
 have()  { command -v "$1" >/dev/null 2>&1; }
 
-load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; PANEL_DOMAIN="${PANEL_DOMAIN:-}"; DESIGN="${DESIGN:-off}"; RELEASE="${RELEASE:-latest}"; }
-panel_domain() { [ -n "$PANEL_DOMAIN" ] && echo "$PANEL_DOMAIN" || echo "panel.${DOMAIN#www.}"; }
+load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; DESIGN="${DESIGN:-off}"; RELEASE="${RELEASE:-latest}"; INSTANCE="${INSTANCE:-}"; }
 need_consent() { [ -f "$CONSENT" ] || die "The person has not agreed to the plan yet." "Run ./gildsite-install plan, explain it, and after a clear yes run ./gildsite-install consent yes." 2; }
 mark_done() { mkdir -p "$DONE_DIR"; date -u +%FT%TZ > "$DONE_DIR/$1"; }
 is_done() { [ -f "$DONE_DIR/$1" ]; }
@@ -82,12 +82,12 @@ cmd_answer() {
   local key="${1:-}" val="${2:-}"
   case "$key" in
     DOMAIN) echo "$val" | grep -Eq '^([a-z0-9-]+\.)+[a-z]{2,}$' || die "\"$val\" does not look like a website address." "Ask for an address like www.company.com (no https://, no slash)." ;;
-    PANEL_DOMAIN) echo "$val" | grep -Eq '^([a-z0-9-]+\.)+[a-z]{2,}$' || die "\"$val\" does not look like an address." "Use something like panel.company.com." ;;
     OWNER_EMAIL) echo "$val" | grep -Eq '^[^@ ]+@[^@ ]+\.[^@ ]+$' || die "\"$val\" does not look like an e-mail." "Ask for the owner's e-mail again." ;;
     COMPANY) [ -n "$val" ] || die "Company name is empty." "Ask for the company name." ;;
     DESIGN) case "$val" in on|off) ;; *) die "DESIGN must be on or off." "Use: answer DESIGN on";; esac ;;
     RELEASE) [ -n "$val" ] || die "RELEASE is empty." "Use a release tag like v1.2.0, or latest." ;;
-    *) die "Unknown answer \"$key\"." "Use one of: DOMAIN, OWNER_EMAIL, COMPANY, PANEL_DOMAIN, DESIGN, RELEASE." ;;
+    INSTANCE) echo "$val" | grep -Eq '^[a-z][a-z0-9-]{1,29}$' || die "INSTANCE must be 2-30 small letters, digits or dashes." "Use something like firma." ;;
+    *) die "Unknown answer \"$key\"." "Use one of: DOMAIN, OWNER_EMAIL, COMPANY, DESIGN, RELEASE, INSTANCE." ;;
   esac
   mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"; touch "$ANSWERS"; chmod 600 "$ANSWERS"
   grep -v "^$key=" "$ANSWERS" > "$ANSWERS.tmp" || true
@@ -106,7 +106,7 @@ cmd_plan() {
 PLAN (nothing has been changed yet)
 
 Website:  https://$DOMAIN
-Panel:    https://$(panel_domain)
+Panel:    https://$DOMAIN/admin
 Owner:    $OWNER_EMAIL
 Company:  $COMPANY
 
@@ -114,10 +114,11 @@ What will happen on this server:
   1. Install Docker (if missing) and create the folder $GILDSITE_HOME.
   2. Download Gildsite release "$RELEASE" from GitHub.
   3. Start in Docker: website, panel, database, search, Aurelius engine$( [ "$DESIGN" = on ] && echo ", Design" ).
-  4. Start the web server (Caddy) with HTTPS certificates for both addresses.
-  5. Allow only ports 22, 80 and 443 from outside. Everything else stays inside the server.
+  4. Start the web server (Caddy) with an HTTPS certificate for the address.
+  5. Open only ports 80 and 443 for the website. The database and panel internals stay inside the server.
+     (An existing firewall is not changed.)
   6. Turn on a nightly backup of the database and photos (kept 7 days).
-  7. Create the owner account for $OWNER_EMAIL.
+  7. Create the owner account for $OWNER_EMAIL and give a one-time link to set the password.
 
 What will NOT happen:
   - No other programs or websites on this server are changed or stopped.
@@ -140,17 +141,204 @@ cmd_dns() {
   [ -n "$DOMAIN" ] || die "No website address yet." "Run ./gildsite-install answer DOMAIN <address> first."
   local ip; ip=$(public_ip)
   [ -n "$ip" ] || die "Could not find this server's public address." "Ask the person for the server's IP address (it is in their hosting panel)."
-  local pd; pd=$(panel_domain)
-  say "Add these records at the domain provider (DNS settings):"
+  local bare=""; case "$DOMAIN" in www.*) bare="${DOMAIN#www.}";; esac
+  say "Add at the domain provider (DNS settings):"
   say "  Type A   Name: $DOMAIN   Value: $ip"
-  say "  Type A   Name: $pd   Value: $ip"
+  [ -n "$bare" ] && say "  Type A   Name: $bare   Value: $ip   (optional: the address without www then opens the site too)"
   say ""
-  local all=1 h got
-  for h in "$DOMAIN" "$pd"; do
-    got=$(resolve "$h")
-    if [ "$got" = "$ip" ]; then ok "$h points to this server"; else warn "$h ${got:+points to $got}${got:-is not set yet}"; all=0; fi
+  local got; got=$(resolve "$DOMAIN")
+  if [ "$got" = "$ip" ]; then ok "$DOMAIN points to this server"; else warn "$DOMAIN ${got:+points to $got}${got:-is not set yet}"; fi
+  if [ -n "$bare" ]; then local g2; g2=$(resolve "$bare"); [ "$g2" = "$ip" ] && ok "$bare points to this server" || warn "$bare not pointing here (optional)"; fi
+  if [ "$got" = "$ip" ]; then mark_done dns; say "DNS READY. Next: ./gildsite-install run"; else say "Waiting for DNS. New records usually work within 5–30 minutes. Run this again in a minute or two."; return 4; fi
+}
+
+# ---------- install (step "run") ----------
+# The site itself comes from the private repo webdev-wzornik. Its own script skrypty/nowy-klient.sh creates the instance
+# in /srv/klienci/<name>; this installer prepares the source, then switches the instance from test mode to production
+# and puts the Caddy web server in front. Every part is skipped when already done, so `run` can be repeated safely.
+SOURCE_REPO="${GILDSITE_SOURCE_REPO:-marcink-ui/webdev-wzornik}"
+SOURCE_DIR="$GILDSITE_HOME/zrodlo"
+WWW_DIR="$GILDSITE_HOME/www"
+KEY_FILE="$STATE_DIR/download-key"
+LOG="$STATE_DIR/install.log"
+
+instance_name() { local n="${INSTANCE:-}"; [ -n "$n" ] || n=$(echo "${DOMAIN#www.}" | cut -d. -f1 | tr -c 'a-z0-9-\n' '-' | sed 's/^[^a-z]*//' | cut -c1-30); [ ${#n} -ge 2 ] || n="gildsite"; echo "$n"; }
+inst_dir() { echo "${GILDSITE_CLIENTS_DIR:-/srv/klienci}/$(instance_name)"; }
+sudo_() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo "$@"; fi; }
+step() { printf '\n== %s\n' "$*"; printf '\n== %s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$LOG"; }
+logrun() { "$@" >> "$LOG" 2>&1; }
+# Proxy settings of the server (if any) are passed to build and install containers.
+proxy_args() { local v; for v in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do [ -n "${!v:-}" ] && printf -- '--build-arg %s=%s ' "$v" "${!v}"; done; true; }
+proxy_env()  { local v; for v in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do [ -n "${!v:-}" ] && printf -- '-e %s=%s ' "$v" "${!v}"; done; [ -n "${GILDSITE_EXTRA_CA:-}" ] && printf -- '-v %s:/extra-ca.crt:ro -e NODE_EXTRA_CA_CERTS=/extra-ca.crt ' "$GILDSITE_EXTRA_CA"; true; }
+setenv() { # setenv FILE KEY VALUE: replace or add one line in a .env file
+  local f="$1" k="$2" v="$3"; grep -v "^$k=" "$f" > "$f.tmp" || true; printf '%s=%s\n' "$k" "$v" >> "$f.tmp"; cat "$f.tmp" > "$f"; rm -f "$f.tmp"; }
+dropenv() { local f="$1"; shift; local k; for k in "$@"; do grep -v "^$k=" "$f" > "$f.tmp" || true; cat "$f.tmp" > "$f"; rm -f "$f.tmp"; done; }
+
+run_docker() {
+  step "1/7 Docker"
+  if have docker && docker info >/dev/null 2>&1; then ok "Docker is running"; return; fi
+  have docker || { say "Installing Docker (official script from get.docker.com)…"; curl -fsSL https://get.docker.com | sudo_ sh >> "$LOG" 2>&1 || die "Docker could not be installed." "Show the person the last lines of $LOG."; }
+  sudo_ systemctl enable --now docker >> "$LOG" 2>&1 || true
+  docker info >/dev/null 2>&1 || die "Docker is installed but not running." "Restart the server once, then run ./gildsite-install run again."
+  ok "Docker installed"
+}
+
+run_source() {
+  step "2/7 Gildsite code ($RELEASE)"
+  if [ -n "${GILDSITE_SOURCE:-}" ]; then # local copy (tests, or a server without GitHub access)
+    [ -d "$SOURCE_DIR/.git" ] || { mkdir -p "$GILDSITE_HOME"; git clone -q "$GILDSITE_SOURCE" "$SOURCE_DIR"; }
+    ok "Code from local copy $GILDSITE_SOURCE"; return
+  fi
+  local url="https://github.com/$SOURCE_REPO.git" ref="$RELEASE"
+  if [ ! -d "$SOURCE_DIR/.git" ]; then
+    mkdir -p "$GILDSITE_HOME"
+    if have gh && gh auth status >/dev/null 2>&1 && gh repo view "$SOURCE_REPO" >/dev/null 2>&1; then
+      logrun gh repo clone "$SOURCE_REPO" "$SOURCE_DIR" || die "Download from GitHub failed." "Check $LOG; then run again."
+    elif [ -s "$KEY_FILE" ]; then
+      logrun git -c "http.extraHeader=Authorization: Basic $(printf 'x-access-token:%s' "$(cat "$KEY_FILE")" | base64 -w0)" clone "$url" "$SOURCE_DIR" \
+        || die "Download from GitHub failed: the download key is wrong or expired." "Ask the person for a new download key and save it with ./gildsite-install key."
+    else
+      die "No access to the Gildsite code yet." "Ask the person for the download key they got with Gildsite, then save it with ./gildsite-install key (it reads the key from input, never print it)." 5
+    fi
+  fi
+  if [ "$ref" != latest ]; then logrun git -C "$SOURCE_DIR" fetch --tags -q || true; logrun git -C "$SOURCE_DIR" checkout -q "$ref" || die "Release $ref not found." "Use ./gildsite-install answer RELEASE latest, or a release that exists."; fi
+  ok "Code ready ($(git -C "$SOURCE_DIR" log -1 --format=%h))"
+}
+
+run_deps() {
+  step "3/7 Libraries (a few minutes)"
+  # shellcheck disable=SC2046
+  if docker image inspect klient-node:22 >/dev/null 2>&1; then ok "Base image already there"; else
+    logrun docker build --network host $(proxy_args) -t klient-node:22 "$SOURCE_DIR/obraz" || die "Building the base image failed." "Check internet access from the server and $LOG."
+    ok "Base image built"; fi
+  local d
+  for d in app astro wektory; do
+    [ -f "$SOURCE_DIR/$d/package-lock.json" ] || continue
+    if [ -d "$SOURCE_DIR/$d/node_modules" ] && [ -f "$SOURCE_DIR/$d/node_modules/.package-lock.json" ]; then ok "$d: already installed"; continue; fi
+    # shellcheck disable=SC2046
+    logrun docker run --rm --network host $(proxy_env) -v "$SOURCE_DIR/$d:/w" -w /w klient-node:22 npm ci --no-audit --no-fund --loglevel=error \
+      || die "Installing libraries for $d failed." "Check internet access from the server and $LOG."
+    ok "$d: installed"
   done
-  if [ "$all" = 1 ]; then mark_done dns; say "DNS READY. Next: ./gildsite-install run"; else say "Waiting for DNS. New records usually work within 5–30 minutes. Run this again in a minute or two."; return 4; fi
+}
+
+run_instance() {
+  local name dir; name=$(instance_name); dir=$(inst_dir)
+  step "4/7 Website and panel ($name), first build (10–20 minutes)"
+  if [ -f "$dir/.env" ] && docker ps --format '{{.Names}}' | grep -q "^$name-panel$"; then ok "Instance $name already exists"; return; fi
+  [ -e "$dir" ] && die "Folder $dir exists but the instance is not running." "Do not delete it. Tell Marcin; the folder may hold someone's data."
+  sudo_ mkdir -p "$(dirname "$dir")"
+  if ! MIN_GB="${MIN_GB:-15}" logrun sh "$SOURCE_DIR/skrypty/nowy-klient.sh" "$name"; then
+    # The last parts of nowy-klient (Knowledge wiki, its timer) are extras: if panel and website run, we go on.
+    if [ -f "$dir/.env" ] && docker ps --format '{{.Names}}' | grep -q "^$name-panel$" && docker ps --format '{{.Names}}' | grep -q "^$name-strona$"; then
+      warn "Instance $name runs, but an extra (Knowledge wiki or its timer) did not finish. It retries later; see $LOG."
+      return
+    fi
+    die "Creating the instance failed." "Show the person the last lines of $LOG (no passwords are in it)."
+  fi
+  ok "Instance $name created"
+}
+
+run_production() {
+  local name dir e sub; name=$(instance_name); dir=$(inst_dir); e="$dir/.env"
+  step "5/7 Production settings and owner account"
+  if is_done production; then ok "Already in production mode"; return; fi
+  cp -p "$e" "$e.przed-instalator-$(date -u +%Y%m%d%H%M%S)"
+  sub=$(grep '^PODSIEC=' "$e" | cut -d= -f2 | sed 's#\.0/24##')
+  # Test mode off: no fake Google, no sandbox profile (Google sign-in is set up later in Connectors).
+  dropenv "$e" TRYB COMPOSE_PROFILES PORT_GOOGLE GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_AUTH_URL GOOGLE_TOKEN_URL GOOGLE_USERINFO_URL GOOGLE_DOMENY
+  setenv "$e" DOMENA "${DOMAIN#www.}"
+  setenv "$e" FIRMA "\"$COMPANY\""
+  setenv "$e" ADRES_PUBLICZNY "https://$DOMAIN"
+  # Caddy talks to the panel from a fixed address inside the instance network; only it is trusted for the visitor's IP.
+  setenv "$e" ZAUFANE_PROXY "$sub.250"
+  docker rm -f "$name-google-atrapa" >/dev/null 2>&1 || true
+  # Owner account: the e-mail the person gave; other demo accounts stay locked with random passwords.
+  install -m 644 "$INSTALLER_DIR/templates/wlasciciel.ts" "$dir/app/tools/gildsite-install-wlasciciel.ts"
+  ( cd "$dir" && OWNER_EMAIL="$OWNER_EMAIL" COMPANY="$COMPANY" logrun docker compose --profile narzedzia run --rm -T -e OWNER_EMAIL -e COMPANY narzedzia npx payload run tools/gildsite-install-wlasciciel.ts ) \
+    || die "Setting the owner e-mail failed." "Check $LOG."
+  ( cd "$dir" && MIN_GB="${MIN_GB:-15}" logrun sh skrypty/buduj.sh oba ) || die "Build with production settings failed." "Check $LOG; the earlier version keeps running."
+  ( cd "$dir" && logrun sh skrypty/start.sh ) || true
+  mark_done production; ok "Production mode on, owner: $OWNER_EMAIL"
+}
+
+run_www() {
+  local name dir sub; name=$(instance_name); dir=$(inst_dir)
+  step "6/7 Web server with HTTPS (Caddy)"
+  sub=$(grep '^PODSIEC=' "$dir/.env" | cut -d= -f2 | sed 's#\.0/24##')
+  mkdir -p "$WWW_DIR"
+  local alias=""; case "$DOMAIN" in www.*) alias="${DOMAIN#www.}";; esac
+  sed -e "s#__DOMAIN__#$DOMAIN#g" -e "s#__ALIAS__#${alias:-__none__}#g" -e "s#__EMAIL__#$OWNER_EMAIL#g" \
+      -e "s#__TLS__#${GILDSITE_TLS:+tls $GILDSITE_TLS}#g" "$INSTALLER_DIR/templates/Caddyfile.template" > "$WWW_DIR/Caddyfile"
+  sed -e "s#__NAME__#$name#g" -e "s#__IP__#$sub.250#g" "$INSTALLER_DIR/templates/www-compose.yml" > "$WWW_DIR/docker-compose.yml"
+  chmod 644 "$WWW_DIR/Caddyfile" "$WWW_DIR/docker-compose.yml"
+  ( cd "$WWW_DIR" && logrun docker compose up -d ) || die "The web server did not start." "Ports 80 or 443 may be taken by another program; check $LOG."
+  [ -n "$alias" ] || sed -i '/__none__/,/^}/d' "$WWW_DIR/Caddyfile"
+  ok "Caddy running for $DOMAIN${alias:+ (and $alias redirects to it)}"
+}
+
+run_backup() {
+  local name dir; name=$(instance_name); dir=$(inst_dir)
+  step "7/7 Nightly backup"
+  if have systemctl && [ -d /run/systemd/system ]; then
+    sudo_ tee /etc/systemd/system/gildsite-kopia-$name.service >/dev/null <<UNIT
+[Unit]
+Description=Gildsite nightly backup ($name)
+[Service]
+Type=oneshot
+ExecStart=/bin/sh $dir/skrypty/kopia-nocna.sh
+UNIT
+    sudo_ tee /etc/systemd/system/gildsite-kopia-$name.timer >/dev/null <<UNIT
+[Unit]
+Description=Gildsite nightly backup ($name) at 3:30
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+    sudo_ systemctl daemon-reload && sudo_ systemctl enable --now "gildsite-kopia-$name.timer" >> "$LOG" 2>&1 && ok "Backup every night at 3:30 (7 days kept)"
+  else
+    warn "No systemd here: nightly backup not scheduled. Run $dir/skrypty/kopia-nocna.sh by hand or from cron."
+  fi
+}
+
+cmd_run() {
+  need_consent; load_answers
+  [ -n "$DOMAIN" ] && [ -n "$OWNER_EMAIL" ] && [ -n "$COMPANY" ] || die "Answers are missing." "Run ./gildsite-install plan."
+  is_done dns || [ -n "${GILDSITE_SKIP_DNS:-}" ] || die "The website address does not point to this server yet." "Run ./gildsite-install dns and wait until it says DNS READY."
+  mkdir -p "$STATE_DIR"; touch "$LOG"; chmod 600 "$LOG"
+  say "Installing Gildsite. Details go to $LOG."
+  run_docker; run_source; run_deps; run_instance; run_production; run_www; run_backup
+  mark_done run
+  say ""; say "INSTALLED. Next: ./gildsite-install finish"
+}
+
+cmd_key() {
+  need_consent
+  mkdir -p "$STATE_DIR"; local k; IFS= read -r k || true
+  [ -n "$k" ] || die "No key given." "Pipe the key in: printf '%s' '<key>' | ./gildsite-install key"
+  printf '%s' "$k" > "$KEY_FILE"; chmod 600 "$KEY_FILE"; say "Download key saved (not shown)."
+}
+
+cmd_finish() {
+  need_consent; load_answers
+  is_done run || die "Gildsite is not installed yet." "Run ./gildsite-install run first."
+  local name dir pd site panel; name=$(instance_name); dir=$(inst_dir); pd="$DOMAIN"
+  local ip="${GILDSITE_TEST_IP:-127.0.0.1}" k="${GILDSITE_TLS:+-k}"
+  site=$(curl -s --noproxy '*' $k -o /dev/null -w '%{http_code}' --resolve "$DOMAIN:443:$ip" "https://$DOMAIN/" || true)
+  panel=$(curl -s --noproxy '*' $k -o /dev/null -w '%{http_code}' --resolve "$DOMAIN:443:$ip" "https://$DOMAIN/admin/login" || true)
+  [ "$site" = 200 ] && ok "Website answers (https://$DOMAIN)" || bad "Website: HTTP $site"
+  [ "$panel" = 200 ] && ok "Panel answers (https://$DOMAIN/admin)" || bad "Panel: HTTP $panel"
+  { [ "$site" = 200 ] && [ "$panel" = 200 ]; } || die "Not everything answers yet." "Wait a minute and run ./gildsite-install finish again; if it stays, check $LOG."
+  # One-time link: the owner sets their own password (no password ever goes through the chat).
+  local token
+  token=$(cd "$dir" && docker compose --profile narzedzia run --rm -T -e OWNER_EMAIL="$OWNER_EMAIL" -e TYLKO_LINK=1 narzedzia npx payload run tools/gildsite-install-wlasciciel.ts 2>/dev/null | sed -n 's/^LINK-TOKEN=//p' | tail -1)
+  [ -n "$token" ] || die "Could not create the login link." "Check $LOG."
+  mark_done finish
+  say ""; say "DONE. Give the person this one-time link (valid 1 hour) to set their password:"
+  say "  https://$pd/admin/reset/$token"
+  say "After that they log in at https://$pd/admin and the panel guides them (Setup)."
 }
 
 cmd_not_yet() {
@@ -179,10 +367,11 @@ usage() {
 Gildsite installer $VERSION. Read INSTALL-FOR-AI.md first.
 
   check [--json]        look at the server (read-only)
-  answer KEY VALUE      save DOMAIN, OWNER_EMAIL, COMPANY (also PANEL_DOMAIN, DESIGN on|off, RELEASE)
+  answer KEY VALUE      save DOMAIN, OWNER_EMAIL, COMPANY (also DESIGN on|off, RELEASE, INSTANCE)
   plan                  show what will happen (read-only)
   consent yes           record the person's yes (only after they said it)
   dns                   show DNS records and check them (read-only)
+  key                   save the download key from input (needs consent; never print it)
   run                   install and start everything (needs consent)
   aurelius              connect Aurelius to the AI on this server (needs consent)
   github                connect GitHub (needs consent)
@@ -197,7 +386,10 @@ case "${1:-}" in
   plan)     cmd_plan ;;
   consent)  shift; cmd_consent "${1:-}" ;;
   dns)      cmd_dns ;;
-  run|aurelius|github|finish) cmd_not_yet "$1" ;;
+  run)      cmd_run ;;
+  key)      cmd_key ;;
+  finish)   cmd_finish ;;
+  aurelius|github) cmd_not_yet "$1" ;;
   status)   cmd_status ;;
   version)  say "$VERSION" ;;
   ""|help|-h|--help) usage ;;
