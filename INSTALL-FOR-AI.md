@@ -12,7 +12,8 @@ Your job: guide them through a short chat, ask for consent once, then let the
 3. **Never print secrets.** Passwords, tokens and keys stay in files the script writes (mode 600). Never echo them into the chat, never ask the person to paste a token into the chat.
 4. **Only the script changes the server.** Do not install, delete or reconfigure anything by hand. If a step fails, show the person the one-line reason from the script and the fix it suggests.
 5. **Do not touch other services** already running on this server. If `check` reports a conflict (busy port 80/443, low memory), stop and explain the choice in one sentence.
-6. **Show progress.** After each step say: "Step N of 8 done: <what now works>."
+6. **Show progress as a card.** Run `./gildsite-install progress` and show its card in the chat after every step and
+   every 1–2 minutes while `run` works (see "Progress card" below). Never paste raw logs.
 
 ## The conversation, step by step
 
@@ -124,6 +125,21 @@ No token goes through the chat; the panel keeps its own encrypted copy and the i
 It checks that the website and the panel answer, then prints a one-time login link for the
 owner. Give the person that link and say: "Log in here. The panel will guide you through
 the rest (company details, languages, sign-in, Aurelius)."
+
+## Progress card
+
+`run` takes 15–25 minutes. Start it in the background (Claude Code: run the command in the background; otherwise
+`nohup ./gildsite-install run > /srv/gildsite/.install/run.out 2>&1 &`), then show the card every 1–2 minutes until it says
+the install is done or stopped:
+
+- If your chat can draw HTML widgets (for example Claude in the Claude app), render the output of
+  `./gildsite-install progress --html` as a widget, in the conversation itself.
+- Otherwise (terminal: Claude Code, Codex) paste the output of `./gildsite-install progress` in a code block.
+- `./gildsite-install progress --json` gives the same data for anything else.
+
+The card shows the steps, how much is done, minutes left, the server's memory and disk, the last few things the
+installer did, and "Your move" (what the person has to do now, or "Nothing"). Translate the card's words into the
+person's language when you retell it. It never contains passwords, keys or links.
 
 ## If something goes wrong
 

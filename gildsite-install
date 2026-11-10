@@ -4,7 +4,7 @@
 set -euo pipefail
 umask 077
 
-VERSION="0.4.0"
+VERSION="0.5.0"
 INSTALLER_DIR="$(cd "$(dirname "$0")" && pwd)"
 GILDSITE_HOME="${GILDSITE_HOME:-/srv/gildsite}"
 STATE_DIR="${GILDSITE_STATE_DIR:-$GILDSITE_HOME/.install}"
@@ -29,10 +29,11 @@ STEPS=(
 
 # ---------- helpers ----------
 say()   { printf '%s\n' "$*"; }
-ok()    { printf '  OK    %s\n' "$*"; }
-warn()  { printf '  WARN  %s\n' "$*"; }
+ok()    { printf '  OK    %s\n' "$*"; activity ok "$*"; }
+warn()  { printf '  WARN  %s\n' "$*"; activity warn "$*"; }
 bad()   { printf '  FAIL  %s\n' "$*"; }
-die()   { printf 'ERROR: %s\nFIX: %s\n' "$1" "${2:-Run ./gildsite-install status and tell the person what is missing.}" >&2; exit "${3:-1}"; }
+die()   { printf 'ERROR: %s\nFIX: %s\n' "$1" "${2:-Run ./gildsite-install status and tell the person what is missing.}" >&2
+          [ -n "${ACTIVITY_ON:-}" ] && { activity error "$1"; progress_set failed "${RUN_STEP:-0}" "$1"; }; exit "${3:-1}"; }
 have()  { command -v "$1" >/dev/null 2>&1; }
 
 load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; DESIGN="${DESIGN:-off}"; RELEASE="${RELEASE:-latest}"; INSTANCE="${INSTANCE:-}"; GITHUB_REPO="${GITHUB_REPO:-}"; WEB_SERVER="${WEB_SERVER:-caddy}"; [ "${GILDSITE_WWW:-}" = none ] && WEB_SERVER=existing; true; }
@@ -166,7 +167,8 @@ LOG="$STATE_DIR/install.log"
 instance_name() { local n="${INSTANCE:-}"; [ -n "$n" ] || n=$(echo "${DOMAIN#www.}" | cut -d. -f1 | tr -c 'a-z0-9-\n' '-' | sed 's/^[^a-z]*//' | cut -c1-30); [ ${#n} -ge 2 ] || n="gildsite"; echo "$n"; }
 inst_dir() { echo "${GILDSITE_CLIENTS_DIR:-/srv/klienci}/$(instance_name)"; }
 sudo_() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo "$@"; fi; }
-step() { printf '\n== %s\n' "$*"; printf '\n== %s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$LOG"; }
+step() { printf '\n== %s\n' "$*"; printf '\n== %s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$LOG"
+  case "$*" in [1-7]/7*) RUN_STEP=${1%%/*}; progress_set running "$RUN_STEP" "$*";; esac; activity step "Working on: ${*#[1-7]/7 }"; }
 logrun() { "$@" >> "$LOG" 2>&1; }
 # Proxy settings of the server (if any) are passed to build and install containers.
 proxy_args() { local v; for v in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do [ -n "${!v:-}" ] && printf -- '--build-arg %s=%s ' "$v" "${!v}"; done; true; }
@@ -331,9 +333,10 @@ cmd_run() {
   [ -n "$DOMAIN" ] && [ -n "$OWNER_EMAIL" ] && [ -n "$COMPANY" ] || die "Answers are missing." "Run ./gildsite-install plan."
   is_done dns || [ -n "${GILDSITE_SKIP_DNS:-}" ] || die "The website address does not point to this server yet." "Run ./gildsite-install dns and wait until it says DNS READY."
   mkdir -p "$STATE_DIR"; touch "$LOG"; chmod 600 "$LOG"
-  say "Installing Gildsite. Details go to $LOG."
+  say "Installing Gildsite. Details go to $LOG. Progress card: ./gildsite-install progress"
+  ACTIVITY_ON=1; progress_set running 1 "starting"
   run_docker; run_source; run_deps; run_instance; run_production; run_www; run_backup
-  mark_done run
+  mark_done run; progress_set done 8 "installed"; activity ok "Gildsite installed"
   say ""; say "INSTALLED. Next: ./gildsite-install finish"
 }
 
@@ -345,7 +348,7 @@ cmd_key() {
 }
 
 cmd_finish() {
-  need_consent; load_answers
+  need_consent; load_answers; ACTIVITY_ON=1
   is_done run || die "Gildsite is not installed yet." "Run ./gildsite-install run first."
   local name dir pd site panel; name=$(instance_name); dir=$(inst_dir); pd="$DOMAIN"
   local ip="${GILDSITE_TEST_IP:-127.0.0.1}" k="${GILDSITE_TLS:+-k}"
@@ -415,7 +418,7 @@ client_codex() {
 }
 
 cmd_aurelius() {
-  need_consent; load_answers
+  need_consent; load_answers; ACTIVITY_ON=1
   is_done run || die "Gildsite is not installed yet." "Run ./gildsite-install run first."
   need_tool
   local dir uid client="${1:-auto}" url="https://$DOMAIN/api/mcp" out code
@@ -444,7 +447,7 @@ cmd_aurelius() {
 gh_() { env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="$GH_DIR" gh "$@"; }
 
 cmd_github() {
-  need_consent; load_answers
+  need_consent; load_answers; ACTIVITY_ON=1
   is_done run || die "Gildsite is not installed yet." "Run ./gildsite-install run first."
   need_tool
   [ -n "${GITHUB_REPO:-}" ] || die "No repository chosen yet." "Ask the person which GitHub repository should get feedback (owner/name), then ./gildsite-install answer GITHUB_REPO owner/name."
@@ -484,6 +487,118 @@ cmd_github() {
   say ""; say "GITHUB CONNECTED. Next: ./gildsite-install finish"
 }
 
+# ---------- progress card ("progress") ----------
+# The installer keeps a small state file while it works; `progress` turns it into a card the AI shows in the chat:
+# text for terminals (Claude Code, Codex), --html for chats that draw HTML widgets, --json for anything else.
+# Only the installer's own messages go into it, never raw build logs, so no secret can leak through the card.
+PROGRESS="$STATE_DIR/progress.env"
+ACTIVITY="$STATE_DIR/activity.log"
+RUN_STEPS=("Docker" "Gildsite code" "Libraries" "Website and panel" "Production settings and owner" "Web server and HTTPS" "Nightly backup")
+RUN_MIN=(2 2 4 12 6 1 1)   # rough minutes per part, for "about N min left"
+
+activity() { [ -n "${ACTIVITY_ON:-}" ] || return 0; mkdir -p "$STATE_DIR"; printf '%s|%s|%s\n' "$(date -u +%H:%M)" "$1" "$2" >> "$ACTIVITY"; chmod 600 "$ACTIVITY" 2>/dev/null || true; }
+progress_set() { [ -n "${ACTIVITY_ON:-}" ] || return 0; mkdir -p "$STATE_DIR"; { printf 'P_STATE=%q\nP_STEP=%q\nP_MSG=%q\nP_AT=%q\n' "$1" "${2:-0}" "${3:-}" "$(date -u +%s)"; } > "$PROGRESS.tmp"; mv "$PROGRESS.tmp" "$PROGRESS"; }
+
+progress_data() { # fills the P_* and C_* variables the three formats print
+  load_answers; P_STATE=idle; P_STEP=0; P_MSG=""; P_AT=0; [ -f "$PROGRESS" ] && . "$PROGRESS"
+  C_ITEMS=(); local n=0 s
+  add() { C_ITEMS+=("$1|$2|$3"); }
+  [ -n "$DOMAIN" ] && [ -n "$OWNER_EMAIL" ] && [ -n "$COMPANY" ] && s=done || s=todo; add "Your answers" "$s" "Address, owner e-mail, company"
+  [ -f "$CONSENT" ] && s=done || s=todo; add "Your yes to the plan" "$s" ""
+  { is_done dns || [ -n "${GILDSITE_SKIP_DNS:-}" ]; } && s=done || s=todo; add "Address points to this server" "$s" "${DOMAIN}"
+  local i
+  for i in "${!RUN_STEPS[@]}"; do
+    if { [ "$P_STATE" != running ] && [ "$P_STATE" != failed ] && is_done run; } || { [ "$P_STATE" != idle ] && [ "$P_STEP" -gt $((i+1)) ]; }; then s=done
+    elif [ "$P_STATE" = running ] && [ "$P_STEP" -eq $((i+1)) ]; then s=now
+    elif [ "$P_STATE" = failed ] && [ "$P_STEP" -eq $((i+1)) ]; then s=failed
+    else s=todo; fi
+    add "${RUN_STEPS[$i]}" "$s" ""
+  done
+  is_done aurelius && s=done || s=todo; add "Connect Aurelius (optional)" "$s" ""
+  is_done finish && s=done || s=todo; add "Login link for the owner" "$s" ""
+  C_TOTAL=${#C_ITEMS[@]}; C_DONE=0; C_NOW=""
+  for s in "${C_ITEMS[@]}"; do case "$s" in *"|done|"*) C_DONE=$((C_DONE+1));; *"|now|"*|*"|failed|"*) [ -n "$C_NOW" ] || C_NOW="${s%%|*}";; esac; done
+  C_PCT=$(( C_DONE * 100 / C_TOTAL ))
+  C_LEFT=0; if [ "$P_STATE" = running ] || ! is_done run; then for i in "${!RUN_MIN[@]}"; do [ "$P_STEP" -le $((i+1)) ] && C_LEFT=$((C_LEFT + RUN_MIN[i])); done; fi
+  local mt ma; mt=$(awk '/MemTotal/{print $2}' /proc/meminfo); ma=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
+  C_RAM_USED=$(awk -v t="$mt" -v a="$ma" 'BEGIN{printf "%.1f", (t-a)/1048576}'); C_RAM_TOTAL=$(awk -v t="$mt" 'BEGIN{printf "%.0f", t/1048576}')
+  C_RAM_PCT=$(( (mt-ma) * 100 / mt ))
+  local p="$GILDSITE_HOME"; while [ ! -d "$p" ]; do p=$(dirname "$p"); done
+  read -r C_DISK_TOTAL C_DISK_USED < <(df -BG --output=size,used "$p" | tail -1 | tr -d G)
+  C_DISK_PCT=$(( C_DISK_USED * 100 / (C_DISK_TOTAL > 0 ? C_DISK_TOTAL : 1) ))
+  if is_done run; then [ "$WEB_SERVER" = existing ] && C_HTTPS="set up by the server admin" || C_HTTPS="on (Caddy)"; else C_HTTPS="not yet"; fi
+  C_LAST=(); [ -f "$ACTIVITY" ] && mapfile -t C_LAST < <(tail -3 "$ACTIVITY")
+  if [ "$P_STATE" = failed ]; then C_MOVE="Something stopped: ${P_MSG}. I will explain what to do."
+  elif [ -z "$DOMAIN" ] || [ -z "$OWNER_EMAIL" ] || [ -z "$COMPANY" ]; then C_MOVE="Answer three short questions in the chat."
+  elif [ ! -f "$CONSENT" ]; then C_MOVE="Read the plan and say yes or no."
+  elif ! is_done dns && [ -z "${GILDSITE_SKIP_DNS:-}" ]; then C_MOVE="Add one DNS record at your domain provider (see the chat)."
+  elif [ "$P_STATE" = running ]; then C_MOVE="Nothing. You can close this; I will write when it is done."
+  elif is_done finish; then C_MOVE="Open your one-time login link and set a password."
+  else C_MOVE="Nothing for now."; fi
+  C_AGO=$(( $(date -u +%s) - P_AT )); [ "$P_AT" -gt 0 ] || C_AGO=-1
+}
+
+bar() { local pct=$1 w=${2:-24} f; f=$(( pct * w / 100 )); printf '%*s' "$f" '' | tr ' ' '#'; printf '%*s' $((w-f)) '' | tr ' ' '.'; }
+
+progress_text() {
+  local s name st det mark i=1 head
+  case "$P_STATE" in running) head="Installing Gildsite";; failed) head="Gildsite: stopped";; *) is_done finish && head="Gildsite is ready" || head="Gildsite installer";; esac
+  printf '%s  ·  %s\n' "$head" "${DOMAIN:-address not set}"
+  printf '[%s] %d%%  ·  %d of %d done%s\n\n' "$(bar "$C_PCT")" "$C_PCT" "$C_DONE" "$C_TOTAL" "$( [ "$C_LEFT" -gt 0 ] && [ "$P_STATE" = running ] && echo "  ·  about $C_LEFT min left" )"
+  for s in "${C_ITEMS[@]}"; do
+    IFS='|' read -r name st det <<< "$s"
+    case "$st" in done) mark="[x]";; now) mark="[>]";; failed) mark="[!]";; *) mark="[ ]";; esac
+    printf ' %s %2d. %s%s\n' "$mark" "$i" "$name" "$( [ "$st" = now ] && echo '  (working now)' )"; i=$((i+1))
+  done
+  printf '\nServer   memory %s of %s GB  ·  disk %s of %s GB  ·  HTTPS %s\n' "$C_RAM_USED" "$C_RAM_TOTAL" "$C_DISK_USED" "$C_DISK_TOTAL" "$C_HTTPS"
+  if [ ${#C_LAST[@]} -gt 0 ]; then printf 'Lately\n'; for s in "${C_LAST[@]}"; do IFS='|' read -r i st det <<< "$s"; printf '  %s  %s\n' "$i" "$det"; done; fi
+  printf 'Your move: %s\n' "$C_MOVE"
+}
+
+esc() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e "s/'/\&#39;/g" -e 's/"/\&quot;/g'; }
+
+progress_html() { # fragment for chat widgets; colours only through the chat's own theme variables
+  local s name st det i=1 rows="" last="" head
+  case "$P_STATE" in running) head="Installing Gildsite";; failed) head="Gildsite: stopped";; *) is_done finish && head="Gildsite is ready" || head="Gildsite installer";; esac
+  for s in "${C_ITEMS[@]}"; do
+    IFS='|' read -r name st det <<< "$s"
+    rows+="<li class='$st'><span class='ic'>$( case "$st" in done) echo '&#10003;';; failed) echo '!';; now) echo '';; *) echo "$i";; esac )</span><span>$(esc "$name")$( [ "$st" = now ] && echo " <em>working now</em>" || true )</span></li>"; i=$((i+1))
+  done
+  for s in "${C_LAST[@]}"; do IFS='|' read -r i st det <<< "$s"; last+="<div><span class='mu'>$(esc "$i")</span> $(esc "$det")</div>"; done
+  cat <<HTML
+<style>.gp{font:14px/1.45 system-ui,sans-serif;color:var(--text-primary);background:var(--surface-1);border:1px solid var(--border);border-radius:14px;padding:16px;max-width:620px}
+.gp h3{margin:0;font-size:15px}.gp .mu{color:var(--text-secondary);font-size:12px}.gp .bar{height:8px;border-radius:99px;background:var(--border);margin:12px 0 4px;overflow:hidden}
+.gp .bar i{display:block;height:100%;background:var(--text-accent)}.gp .cols{display:grid;grid-template-columns:1.2fr 1fr;gap:14px;margin-top:12px}
+@media(max-width:520px){.gp .cols{grid-template-columns:1fr}}.gp ol{list-style:none;margin:0;padding:0}.gp li{display:flex;gap:8px;align-items:center;padding:4px 0}
+.gp .ic{width:18px;height:18px;border-radius:50%;border:1.5px solid var(--border);display:grid;place-items:center;font-size:11px;color:var(--text-muted)}
+.gp .done .ic{background:var(--text-success);border-color:var(--text-success);color:var(--surface-1)}.gp .done{color:var(--text-secondary)}
+.gp .now .ic{border-color:var(--text-accent)}.gp .now .ic::after{content:'';width:8px;height:8px;border-radius:50%;background:var(--text-accent)}
+.gp .failed .ic{border-color:var(--text-danger);color:var(--text-danger)}.gp .todo{color:var(--text-muted)}.gp em{color:var(--text-accent);font-style:normal;font-size:12px}
+.gp .box{border:1px solid var(--border);border-radius:10px;padding:8px 10px;margin-bottom:8px;font-size:13px}.gp .lab{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted)}
+.gp .mv{color:var(--text-warning)}</style>
+<div class='gp'><h3>$(esc "$head")</h3><div class='mu'>$(esc "${DOMAIN:-address not set}")$( [ "$C_AGO" -ge 0 ] && echo " · updated ${C_AGO}s ago" )</div>
+<div class='bar'><i style='width:${C_PCT}%'></i></div><div class='mu'>${C_DONE} of ${C_TOTAL} done · ${C_PCT}%$( [ "$C_LEFT" -gt 0 ] && [ "$P_STATE" = running ] && echo " · about ${C_LEFT} min left" )</div>
+<div class='cols'><ol>${rows}</ol><div>
+<div class='box'><div class='lab'>Server</div>Memory ${C_RAM_USED} of ${C_RAM_TOTAL} GB<div class='bar'><i style='width:${C_RAM_PCT}%'></i></div>Disk ${C_DISK_USED} of ${C_DISK_TOTAL} GB<div class='bar'><i style='width:${C_DISK_PCT}%'></i></div>HTTPS: $(esc "$C_HTTPS")</div>
+$( [ -n "$last" ] && echo "<div class='box'><div class='lab'>Lately</div>${last}</div>" )
+<div class='box'><div class='lab'>Your move</div><span class='mv'>$(esc "$C_MOVE")</span></div></div></div></div>
+HTML
+}
+
+json_s() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+progress_json() {
+  local s name st det first=1
+  printf '{"state":"%s","domain":"%s","done":%d,"total":%d,"percent":%d,"minutes_left":%d,"your_move":"%s","https":"%s","memory_gb":{"used":%s,"total":%s},"disk_gb":{"used":%s,"total":%s},"steps":[' \
+    "$P_STATE" "$(json_s "$DOMAIN")" "$C_DONE" "$C_TOTAL" "$C_PCT" "$C_LEFT" "$(json_s "$C_MOVE")" "$(json_s "$C_HTTPS")" "$C_RAM_USED" "$C_RAM_TOTAL" "$C_DISK_USED" "$C_DISK_TOTAL"
+  for s in "${C_ITEMS[@]}"; do IFS='|' read -r name st det <<< "$s"; [ $first = 1 ] || printf ','; first=0; printf '{"name":"%s","status":"%s"}' "$(json_s "$name")" "$st"; done
+  printf ']}\n'
+}
+
+cmd_progress() {
+  progress_data
+  case "${1:-}" in --html) progress_html ;; --json) progress_json ;; *) progress_text ;; esac
+}
+
 cmd_status() {
   load_answers
   say "Gildsite installer $VERSION: status"
@@ -515,6 +630,7 @@ Gildsite installer $VERSION. Read INSTALL-FOR-AI.md first.
   github                connect GitHub (needs consent and answer GITHUB_REPO; run again after the person confirms)
   finish                final check and owner login link (needs consent)
   status                which steps are done
+  progress [--html|--json]  progress card for the chat (text, HTML widget or data)
 USE
 }
 
@@ -530,6 +646,7 @@ case "${1:-}" in
   aurelius) shift; cmd_aurelius "${1:-}" ;;
   github)   cmd_github ;;
   status)   cmd_status ;;
+  progress) shift; cmd_progress "${1:-}" ;;
   version)  say "$VERSION" ;;
   ""|help|-h|--help) usage ;;
   *) usage; exit 1 ;;
