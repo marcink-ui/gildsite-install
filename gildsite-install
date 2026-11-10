@@ -4,7 +4,7 @@
 set -euo pipefail
 umask 077
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 INSTALLER_DIR="$(cd "$(dirname "$0")" && pwd)"
 GILDSITE_HOME="${GILDSITE_HOME:-/srv/gildsite}"
 STATE_DIR="${GILDSITE_STATE_DIR:-$GILDSITE_HOME/.install}"
@@ -35,7 +35,7 @@ bad()   { printf '  FAIL  %s\n' "$*"; }
 die()   { printf 'ERROR: %s\nFIX: %s\n' "$1" "${2:-Run ./gildsite-install status and tell the person what is missing.}" >&2; exit "${3:-1}"; }
 have()  { command -v "$1" >/dev/null 2>&1; }
 
-load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; DESIGN="${DESIGN:-off}"; RELEASE="${RELEASE:-latest}"; INSTANCE="${INSTANCE:-}"; }
+load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; DESIGN="${DESIGN:-off}"; RELEASE="${RELEASE:-latest}"; INSTANCE="${INSTANCE:-}"; GITHUB_REPO="${GITHUB_REPO:-}"; }
 need_consent() { [ -f "$CONSENT" ] || die "The person has not agreed to the plan yet." "Run ./gildsite-install plan, explain it, and after a clear yes run ./gildsite-install consent yes." 2; }
 mark_done() { mkdir -p "$DONE_DIR"; date -u +%FT%TZ > "$DONE_DIR/$1"; }
 is_done() { [ -f "$DONE_DIR/$1" ]; }
@@ -87,13 +87,14 @@ cmd_answer() {
     DESIGN) case "$val" in on|off) ;; *) die "DESIGN must be on or off." "Use: answer DESIGN on";; esac ;;
     RELEASE) [ -n "$val" ] || die "RELEASE is empty." "Use a release tag like v1.2.0, or latest." ;;
     INSTANCE) echo "$val" | grep -Eq '^[a-z][a-z0-9-]{1,29}$' || die "INSTANCE must be 2-30 small letters, digits or dashes." "Use something like firma." ;;
-    *) die "Unknown answer \"$key\"." "Use one of: DOMAIN, OWNER_EMAIL, COMPANY, DESIGN, RELEASE, INSTANCE." ;;
+    GITHUB_REPO) echo "$val" | grep -Eq '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$' || die "\"$val\" is not a repository name." "Use owner/name, for example your-company/website." ;;
+    *) die "Unknown answer \"$key\"." "Use one of: DOMAIN, OWNER_EMAIL, COMPANY, DESIGN, RELEASE, INSTANCE, GITHUB_REPO." ;;
   esac
   mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"; touch "$ANSWERS"; chmod 600 "$ANSWERS"
   grep -v "^$key=" "$ANSWERS" > "$ANSWERS.tmp" || true
   printf '%s=%q\n' "$key" "$val" >> "$ANSWERS.tmp"; chmod 600 "$ANSWERS.tmp"; mv "$ANSWERS.tmp" "$ANSWERS"
   # A new answer after consent changes the plan, so the person has to agree again.
-  [ -f "$CONSENT" ] && rm -f "$CONSENT" && say "The plan changed, so the earlier yes no longer counts. Show the plan again."
+  [ "$key" != GITHUB_REPO ] && [ -f "$CONSENT" ] && rm -f "$CONSENT" && say "The plan changed, so the earlier yes no longer counts. Show the plan again."
   say "Saved $key."
 }
 
@@ -341,9 +342,118 @@ cmd_finish() {
   say "After that they log in at https://$pd/admin and the panel guides them (Setup)."
 }
 
-cmd_not_yet() {
-  need_consent
-  die "Step \"$1\" is not built yet in installer $VERSION (skeleton)." "Tell the person the installer is still being built; nothing was changed." 3
+# ---------- connections (steps "aurelius" and "github") ----------
+# Both use the template's server command app/tools/serwer-polaczenia.ts (release 9cbf11d or newer). It writes the AI Access
+# password only to a file (600) and logs every change in Security Log. Secrets never go through the chat or the command line
+# of the panel: files in the instance folder dane/home (= /app/.home in the container), removed right after use.
+AI_KEY_FILE="$STATE_DIR/ai-access-key"
+GH_DIR="$STATE_DIR/gh"
+GH_OUT="$STATE_DIR/github-login.out"
+GH_PID="$STATE_DIR/github-login.pid"
+
+need_tool() { [ -f "$(inst_dir)/app/tools/serwer-polaczenia.ts" ] || die "This Gildsite release cannot set up connections from the server yet." "Install a newer release (./gildsite-install answer RELEASE <tag>, then run), or set it up in the panel: Settings." 3; }
+inst_uid() { grep '^UID_KLIENTA=' "$(inst_dir)/.env" | cut -d= -f2; }
+connections() { # connections ENV...: run the server command in the tools container, output to the log and stdout (no secrets in it)
+  local dir; dir=$(inst_dir)
+  ( cd "$dir" && docker compose --profile narzedzia run --rm -T "$@" narzedzia npx payload run tools/serwer-polaczenia.ts 2>>"$LOG" | tee -a "$LOG" | grep -E '^(AI-ACCESS-ID|GITHUB)=|missing|must|There is no|does not exist' )
+}
+# The AI client belongs to the person who runs the AI (with sudo: that user, not root).
+ai_user() { if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then echo "$SUDO_USER"; else id -un; fi; }
+ai_home() { [ -n "${GILDSITE_AI_HOME:-}" ] && { echo "$GILDSITE_AI_HOME"; return; }; getent passwd "$(ai_user)" | cut -d: -f6; }
+as_ai() { local u; u=$(ai_user); if [ "$u" = "$(id -un)" ]; then HOME="$(ai_home)" "$@"; else sudo -u "$u" -H "$@"; fi; }
+as_ai_has() { as_ai sh -c "command -v $1" >/dev/null 2>&1; }
+
+mcp_check() { # does the panel answer AI Access with this key? (header from a 600 file, never on the command line)
+  local hf code ip="${GILDSITE_TEST_IP:-127.0.0.1}"; hf=$(mktemp); chmod 600 "$hf"
+  printf 'Authorization: Bearer %s\n' "$(cat "$AI_KEY_FILE")" > "$hf"
+  code=$(curl -s --noproxy '*' ${GILDSITE_TLS:+-k} -o /dev/null -w '%{http_code}' --resolve "$DOMAIN:443:$ip" -H @"$hf" \
+    -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"gildsite-install","version":"1"}}}' \
+    "https://$DOMAIN/api/mcp" || true)
+  rm -f "$hf"; echo "$code"
+}
+
+client_claude() {
+  local url="$1" key; key=$(cat "$AI_KEY_FILE")
+  as_ai claude mcp remove gildsite -s user >/dev/null 2>&1 || true
+  as_ai claude mcp add --transport http --scope user gildsite "$url" --header "Authorization: Bearer $key" >> "$LOG" 2>&1
+}
+client_codex() {
+  local url="$1" f d; d="$(ai_home)/.codex"; f="$d/config.toml"
+  as_ai mkdir -p "$d"; as_ai touch "$f"
+  # Replace our own block only; everything else in the file stays as it was.
+  as_ai sh -c "awk 'BEGIN{s=0} /^\[mcp_servers\.gildsite\]/{s=1;next} /^\[/{s=0} !s' '$f' > '$f.tmp' && cat '$f.tmp' > '$f' && rm -f '$f.tmp' && chmod 600 '$f'"
+  { printf '\n[mcp_servers.gildsite]\nurl = "%s"\nhttp_headers = { Authorization = "Bearer %s" }\n' "$url" "$(cat "$AI_KEY_FILE")"; } | as_ai sh -c "cat >> '$f'"
+}
+
+cmd_aurelius() {
+  need_consent; load_answers
+  is_done run || die "Gildsite is not installed yet." "Run ./gildsite-install run first."
+  need_tool
+  local dir uid client="${1:-auto}" url="https://$DOMAIN/api/mcp" out code
+  dir=$(inst_dir); uid=$(inst_uid)
+  case "$client" in auto|claude|codex|none) ;; *) die "Unknown AI client \"$client\"." "Use: aurelius [claude|codex|none]";; esac
+  step "Aurelius: AI Access key for the AI on this server"
+  local hostfile="$dir/dane/home/.gildsite-ai-access"
+  rm -f "$hostfile"; trap 'rm -f "'"$hostfile"'"' RETURN EXIT
+  out=$(connections -e PLIK=/app/.home/.gildsite-ai-access -e NAZWA="Server AI (installer)" -e DNI="${GILDSITE_AI_DAYS:-90}") \
+    || die "Creating the AI Access key failed: ${out:-see the log}." "Check $LOG. The panel keeps working; AI Access can also be set up in the panel."
+  [ -s "$hostfile" ] || die "The AI Access key file was not written." "Check $LOG."
+  install -m 600 "$hostfile" "$AI_KEY_FILE"; rm -f "$hostfile"
+  ok "AI Access key ready (stored in $AI_KEY_FILE, not shown). $(echo "$out" | grep -o 'WAZNE-DO=[0-9-]*' | sed 's/WAZNE-DO=/valid until /')"
+  ok "It can read and write drafts only; publishing stays a person's click"
+  code=$(mcp_check); [ "$code" = 200 ] && ok "Panel answers AI Access at $url" || warn "AI Access answered HTTP $code (check again after DNS and HTTPS work)"
+  if [ "$client" = auto ]; then if as_ai_has claude; then client=claude; elif as_ai_has codex; then client=codex; else client=none; fi; fi
+  case "$client" in
+    claude) client_claude "$url" || die "Adding the panel to Claude Code failed." "Check $LOG."; ok "Claude Code ($(ai_user)): panel added as connector \"gildsite\"" ;;
+    codex)  client_codex "$url" || die "Adding the panel to Codex failed." "Check $LOG."; ok "Codex ($(ai_user)): panel added as connector \"gildsite\" in ~/.codex/config.toml" ;;
+    none)   warn "No Claude Code or Codex found for $(ai_user). Add a connector by hand: address $url, header Authorization: Bearer <contents of $AI_KEY_FILE>." ;;
+  esac
+  mark_done aurelius
+  say ""; say "AURELIUS CONNECTED${client:+ ($client)}. Start a new AI session so it sees the \"gildsite\" tools. Next: ./gildsite-install github (optional) or finish"
+}
+
+gh_() { env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="$GH_DIR" gh "$@"; }
+
+cmd_github() {
+  need_consent; load_answers
+  is_done run || die "Gildsite is not installed yet." "Run ./gildsite-install run first."
+  need_tool
+  [ -n "${GITHUB_REPO:-}" ] || die "No repository chosen yet." "Ask the person which GitHub repository should get feedback (owner/name), then ./gildsite-install answer GITHUB_REPO owner/name."
+  if ! have gh; then step "GitHub: install the GitHub tool (gh)"; sudo_ apt-get install -y gh >> "$LOG" 2>&1 || die "Installing gh failed." "Check $LOG."; fi
+  mkdir -p "$GH_DIR"; chmod 700 "$GH_DIR"
+  if ! gh_ auth status -h github.com >/dev/null 2>&1; then
+    # Device login: the person opens a GitHub page and types a short code. No token goes through the chat.
+    if [ -f "$GH_PID" ] && kill -0 "$(cat "$GH_PID")" 2>/dev/null; then
+      say "Still waiting for the person to confirm on GitHub."
+    else
+      : > "$GH_OUT"; chmod 600 "$GH_OUT"
+      ( env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="$GH_DIR" nohup gh auth login -h github.com -p https --web --skip-ssh-key -s repo </dev/null >"$GH_OUT" 2>&1 & echo $! > "$GH_PID" )
+      local i; for i in $(seq 1 20); do grep -q 'one-time code' "$GH_OUT" && break; sleep 1; done
+    fi
+    local codeline; codeline=$({ grep -o 'one-time code: [A-Z0-9-]*' "$GH_OUT" || true; } | tail -1 | sed 's/one-time code: //')
+    [ -n "$codeline" ] || die "GitHub did not give a login code: $(tail -1 "$GH_OUT")." "Check the internet connection and run ./gildsite-install github again."
+    say "GITHUB=WAITING"
+    say "Ask the person to open https://github.com/login/device, sign in, type the code $codeline and allow access."
+    say "Then run ./gildsite-install github again."
+    return 4
+  fi
+  step "GitHub: connect the panel to $GITHUB_REPO"
+  local dir uid tok out; dir=$(inst_dir); uid=$(inst_uid); tok="$dir/dane/home/.gildsite-gh-token"
+  trap 'rm -f "'"$tok"'"' RETURN EXIT
+  ( umask 077; gh_ auth token > "$tok" ) || die "Reading the GitHub login failed." "Run ./gildsite-install github again."
+  chown "$uid:$uid" "$tok" 2>/dev/null || true
+  out=$(connections -e GITHUB_TOKEN_PLIK=/app/.home/.gildsite-gh-token -e REPO="$GITHUB_REPO") || true
+  rm -f "$tok"
+  case "$out" in
+    *GITHUB=polaczono*) ;;
+    *) die "GitHub refused: $(echo "$out" | sed -n 's/^GITHUB=blad //p' | head -1)" "Check the repository name and that this GitHub account can open issues there, then run ./gildsite-install github again." ;;
+  esac
+  # The panel now keeps its own encrypted copy; the installer does not keep a second one.
+  gh_ auth logout -h github.com >/dev/null 2>&1 || true; rm -rf "$GH_DIR" "$GH_OUT" "$GH_PID"
+  mark_done github
+  ok "Panel connected to GitHub: $GITHUB_REPO (feedback goes there as issues)"
+  say ""; say "GITHUB CONNECTED. Next: ./gildsite-install finish"
 }
 
 cmd_status() {
@@ -373,8 +483,8 @@ Gildsite installer $VERSION. Read INSTALL-FOR-AI.md first.
   dns                   show DNS records and check them (read-only)
   key                   save the download key from input (needs consent; never print it)
   run                   install and start everything (needs consent)
-  aurelius              connect Aurelius to the AI on this server (needs consent)
-  github                connect GitHub (needs consent)
+  aurelius [claude|codex|none]  connect Aurelius to the AI on this server (needs consent)
+  github                connect GitHub (needs consent and answer GITHUB_REPO; run again after the person confirms)
   finish                final check and owner login link (needs consent)
   status                which steps are done
 USE
@@ -389,7 +499,8 @@ case "${1:-}" in
   run)      cmd_run ;;
   key)      cmd_key ;;
   finish)   cmd_finish ;;
-  aurelius|github) cmd_not_yet "$1" ;;
+  aurelius) shift; cmd_aurelius "${1:-}" ;;
+  github)   cmd_github ;;
   status)   cmd_status ;;
   version)  say "$VERSION" ;;
   ""|help|-h|--help) usage ;;
