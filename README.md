@@ -27,4 +27,4 @@ About 10 minutes of your time. The installation itself takes 15–25 minutes.
 - Passwords and keys are stored only in files on the server, never shown in the chat.
 - Other programs on the server are not touched.
 
-Status: version 0.3.0. Installing the website and panel works (tested on a clean machine). Connecting Aurelius (Claude Code, Codex) works and needs Gildsite 9cbf11d or newer. Connecting GitHub uses a device login and still has to be tried on a real server.
+Status: version 0.4.0. Installing the website and panel works (tested on a clean machine and on a server that already runs nginx). Connecting Aurelius (Claude Code, Codex) works and needs Gildsite 9cbf11d or newer. Connecting GitHub uses a device login and still has to be tried on a real server.
