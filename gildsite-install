@@ -4,7 +4,7 @@
 set -euo pipefail
 umask 077
 
-VERSION="0.3.0"
+VERSION="0.4.0"
 INSTALLER_DIR="$(cd "$(dirname "$0")" && pwd)"
 GILDSITE_HOME="${GILDSITE_HOME:-/srv/gildsite}"
 STATE_DIR="${GILDSITE_STATE_DIR:-$GILDSITE_HOME/.install}"
@@ -35,7 +35,7 @@ bad()   { printf '  FAIL  %s\n' "$*"; }
 die()   { printf 'ERROR: %s\nFIX: %s\n' "$1" "${2:-Run ./gildsite-install status and tell the person what is missing.}" >&2; exit "${3:-1}"; }
 have()  { command -v "$1" >/dev/null 2>&1; }
 
-load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; DESIGN="${DESIGN:-off}"; RELEASE="${RELEASE:-latest}"; INSTANCE="${INSTANCE:-}"; GITHUB_REPO="${GITHUB_REPO:-}"; }
+load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; DESIGN="${DESIGN:-off}"; RELEASE="${RELEASE:-latest}"; INSTANCE="${INSTANCE:-}"; GITHUB_REPO="${GITHUB_REPO:-}"; WEB_SERVER="${WEB_SERVER:-caddy}"; [ "${GILDSITE_WWW:-}" = none ] && WEB_SERVER=existing; true; }
 need_consent() { [ -f "$CONSENT" ] || die "The person has not agreed to the plan yet." "Run ./gildsite-install plan, explain it, and after a clear yes run ./gildsite-install consent yes." 2; }
 mark_done() { mkdir -p "$DONE_DIR"; date -u +%FT%TZ > "$DONE_DIR/$1"; }
 is_done() { [ -f "$DONE_DIR/$1" ]; }
@@ -70,7 +70,7 @@ cmd_check() {
   if [ "$(id -u)" = 0 ] || (have sudo && sudo -n true 2>/dev/null); then ok "Admin rights: yes"; else bad "Admin rights: no (run as root or with sudo)"; fails=$((fails+1)); fi
   if have docker; then ok "Docker: $(docker --version 2>/dev/null | cut -d, -f1)"; else warn "Docker: not installed yet (the installer will add it)"; fi
   local p; for p in 80 443; do
-    if port_busy "$p"; then warn "Port $p is used by another program. The installer will not take it over; it will ask what to do."; else ok "Port $p: free"; fi
+    if port_busy "$p"; then warn "Port $p is used by another program. The installer will not take it over; answer WEB_SERVER existing to keep the current web server."; else ok "Port $p: free"; fi
   done
   if [ ${#ais[@]} -gt 0 ]; then ok "AI on this server: ${ais[*]} (Aurelius can connect to it)"; else warn "AI on this server: none found (Aurelius can still use an API key in the panel)"; fi
   if have gh; then ok "GitHub tool: installed"; else warn "GitHub tool: not installed (optional, the installer can add it)"; fi
@@ -87,8 +87,9 @@ cmd_answer() {
     DESIGN) case "$val" in on|off) ;; *) die "DESIGN must be on or off." "Use: answer DESIGN on";; esac ;;
     RELEASE) [ -n "$val" ] || die "RELEASE is empty." "Use a release tag like v1.2.0, or latest." ;;
     INSTANCE) echo "$val" | grep -Eq '^[a-z][a-z0-9-]{1,29}$' || die "INSTANCE must be 2-30 small letters, digits or dashes." "Use something like firma." ;;
+    WEB_SERVER) case "$val" in caddy|existing) ;; *) die "WEB_SERVER must be caddy or existing." "Use existing when nginx or Apache already serves ports 80 and 443 on this server.";; esac ;;
     GITHUB_REPO) echo "$val" | grep -Eq '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$' || die "\"$val\" is not a repository name." "Use owner/name, for example your-company/website." ;;
-    *) die "Unknown answer \"$key\"." "Use one of: DOMAIN, OWNER_EMAIL, COMPANY, DESIGN, RELEASE, INSTANCE, GITHUB_REPO." ;;
+    *) die "Unknown answer \"$key\"." "Use one of: DOMAIN, OWNER_EMAIL, COMPANY, DESIGN, RELEASE, INSTANCE, WEB_SERVER, GITHUB_REPO." ;;
   esac
   mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"; touch "$ANSWERS"; chmod 600 "$ANSWERS"
   grep -v "^$key=" "$ANSWERS" > "$ANSWERS.tmp" || true
@@ -113,11 +114,10 @@ Company:  $COMPANY
 
 What will happen on this server:
   1. Install Docker (if missing) and create the folder $GILDSITE_HOME.
-  2. Download Gildsite release "$RELEASE" from GitHub.
+  2. $( [ -n "${GILDSITE_SOURCE:-}" ] && echo "Take the Gildsite code from the local copy ${GILDSITE_SOURCE}." || echo "Download Gildsite release \"$RELEASE\" from GitHub." )
   3. Start in Docker: website, panel, database, search, Aurelius engine$( [ "$DESIGN" = on ] && echo ", Design" ).
-  4. Start the web server (Caddy) with an HTTPS certificate for the address.
-  5. Open only ports 80 and 443 for the website. The database and panel internals stay inside the server.
-     (An existing firewall is not changed.)
+$( if [ "$WEB_SERVER" = existing ]; then echo "  4. Keep the web server already running here (nginx or Apache): the installer writes a ready config file
+     for it and does not change it. Whoever looks after that server adds the file and the HTTPS certificate."; echo "  5. The panel and website listen only inside the server; the existing web server passes visitors to them."; else echo "  4. Start the web server (Caddy) with an HTTPS certificate for the address."; echo "  5. Open only ports 80 and 443 for the website. The database and panel internals stay inside the server."; echo "     (An existing firewall is not changed.)"; fi )
   6. Turn on a nightly backup of the database and photos (kept 7 days).
   7. Create the owner account for $OWNER_EMAIL and give a one-time link to set the password.
 
@@ -187,7 +187,13 @@ run_docker() {
 run_source() {
   step "2/7 Gildsite code ($RELEASE)"
   if [ -n "${GILDSITE_SOURCE:-}" ]; then # local copy (tests, or a server without GitHub access)
-    [ -d "$SOURCE_DIR/.git" ] || { mkdir -p "$GILDSITE_HOME"; git clone -q "$GILDSITE_SOURCE" "$SOURCE_DIR"; }
+    if [ ! -d "$SOURCE_DIR/.git" ]; then
+      mkdir -p "$GILDSITE_HOME"; local src="$GILDSITE_SOURCE"
+      # A folder owned by another user makes git refuse ("dubious ownership"), so a folder goes through a bundle file.
+      if [ -d "$src" ]; then src="$STATE_DIR/source.bundle"; logrun git -c safe.directory='*' -C "$GILDSITE_SOURCE" bundle create "$src" HEAD || die "Reading the local copy $GILDSITE_SOURCE failed." "Check $LOG."; fi
+      logrun git clone -q "$src" "$SOURCE_DIR" || die "Copying the code from $GILDSITE_SOURCE failed." "Check $LOG."
+      rm -f "$STATE_DIR/source.bundle"
+    fi
     ok "Code from local copy $GILDSITE_SOURCE"; return
   fi
   local url="https://github.com/$SOURCE_REPO.git" ref="$RELEASE"
@@ -226,19 +232,24 @@ run_deps() {
 run_instance() {
   local name dir; name=$(instance_name); dir=$(inst_dir)
   step "4/7 Website and panel ($name), first build (10–20 minutes)"
-  if [ -f "$dir/.env" ] && docker ps --format '{{.Names}}' | grep -q "^$name-panel$"; then ok "Instance $name already exists"; return; fi
+  if [ -f "$dir/.env" ] && docker ps --format '{{.Names}}' | grep -q "^$name-panel$"; then models_owner "$dir"; ok "Instance $name already exists"; return; fi
   [ -e "$dir" ] && die "Folder $dir exists but the instance is not running." "Do not delete it. Tell Marcin; the folder may hold someone's data."
   sudo_ mkdir -p "$(dirname "$dir")"
   if ! MIN_GB="${MIN_GB:-15}" logrun sh "$SOURCE_DIR/skrypty/nowy-klient.sh" "$name"; then
     # The last parts of nowy-klient (Knowledge wiki, its timer) are extras: if panel and website run, we go on.
     if [ -f "$dir/.env" ] && docker ps --format '{{.Names}}' | grep -q "^$name-panel$" && docker ps --format '{{.Names}}' | grep -q "^$name-strona$"; then
-      warn "Instance $name runs, but an extra (Knowledge wiki or its timer) did not finish. It retries later; see $LOG."
+      models_owner "$dir"; warn "Instance $name runs, but an extra (Knowledge wiki or its timer) did not finish. It retries later; see $LOG."
       return
     fi
     die "Creating the instance failed." "Show the person the last lines of $LOG (no passwords are in it)."
   fi
+  models_owner "$dir"
   ok "Instance $name created"
 }
+# Search needs dane/modele owned by the instance user; when Docker creates it, it belongs to root and search keeps restarting.
+models_owner() { local d="$1" u; u=$(grep '^UID_KLIENTA=' "$d/.env" | cut -d= -f2); [ -n "$u" ] || return 0
+  sudo_ mkdir -p "$d/dane/modele"; [ "$(stat -c %u "$d/dane/modele")" = "$u" ] && return 0
+  sudo_ chown -R "$u:$u" "$d/dane/modele"; ( cd "$d" && docker compose restart wektory >> "$LOG" 2>&1 ) || true; ok "Search model folder fixed (owner $u)"; }
 
 run_production() {
   local name dir e sub; name=$(instance_name); dir=$(inst_dir); e="$dir/.env"
@@ -251,8 +262,9 @@ run_production() {
   setenv "$e" DOMENA "${DOMAIN#www.}"
   setenv "$e" FIRMA "\"$COMPANY\""
   setenv "$e" ADRES_PUBLICZNY "https://$DOMAIN"
-  # Caddy talks to the panel from a fixed address inside the instance network; only it is trusted for the visitor's IP.
-  setenv "$e" ZAUFANE_PROXY "$sub.250"
+  # Only the web server in front is trusted for the visitor's IP: Caddy from a fixed address in the instance network,
+  # an existing nginx/Apache through the Docker gateway (.1) of that network.
+  if [ "$WEB_SERVER" = existing ]; then setenv "$e" ZAUFANE_PROXY "$sub.1"; else setenv "$e" ZAUFANE_PROXY "$sub.250"; fi
   docker rm -f "$name-google-atrapa" >/dev/null 2>&1 || true
   # Owner account: the e-mail the person gave; other demo accounts stay locked with random passwords.
   install -m 644 "$INSTALLER_DIR/templates/wlasciciel.ts" "$dir/app/tools/gildsite-install-wlasciciel.ts"
@@ -265,16 +277,26 @@ run_production() {
 
 run_www() {
   local name dir sub; name=$(instance_name); dir=$(inst_dir)
-  step "6/7 Web server with HTTPS (Caddy)"
   sub=$(grep '^PODSIEC=' "$dir/.env" | cut -d= -f2 | sed 's#\.0/24##')
-  mkdir -p "$WWW_DIR"
   local alias=""; case "$DOMAIN" in www.*) alias="${DOMAIN#www.}";; esac
+  if [ "$WEB_SERVER" = existing ]; then
+    step "6/7 Config for the existing web server (not changed by the installer)"
+    local pp ps f="$GILDSITE_HOME/nginx-$name.conf"
+    pp=$(grep '^PORT_PANEL=' "$dir/.env" | cut -d= -f2); ps=$(grep '^PORT_STRONA=' "$dir/.env" | cut -d= -f2)
+    sed -e "s#__DOMAIN__#$DOMAIN#g" -e "s#__ALIAS__#${alias}#g" -e "s#__PORT_PANEL__#$pp#g" -e "s#__PORT_STRONA__#$ps#g" \
+      "$INSTALLER_DIR/templates/nginx-site.conf.template" > "$f"; chmod 644 "$f"
+    ok "nginx config written: $f"
+    warn "Whoever looks after this server copies it to /etc/nginx/sites-available/, runs nginx -t, reloads nginx and adds HTTPS (certbot --nginx -d $DOMAIN${alias:+ -d $alias})."
+    return
+  fi
+  step "6/7 Web server with HTTPS (Caddy)"
+  mkdir -p "$WWW_DIR"
   sed -e "s#__DOMAIN__#$DOMAIN#g" -e "s#__ALIAS__#${alias:-__none__}#g" -e "s#__EMAIL__#$OWNER_EMAIL#g" \
       -e "s#__TLS__#${GILDSITE_TLS:+tls $GILDSITE_TLS}#g" "$INSTALLER_DIR/templates/Caddyfile.template" > "$WWW_DIR/Caddyfile"
+  [ -n "$alias" ] || sed -i '/__none__/,/^}/d' "$WWW_DIR/Caddyfile"
   sed -e "s#__NAME__#$name#g" -e "s#__IP__#$sub.250#g" "$INSTALLER_DIR/templates/www-compose.yml" > "$WWW_DIR/docker-compose.yml"
   chmod 644 "$WWW_DIR/Caddyfile" "$WWW_DIR/docker-compose.yml"
-  ( cd "$WWW_DIR" && logrun docker compose up -d ) || die "The web server did not start." "Ports 80 or 443 may be taken by another program; check $LOG."
-  [ -n "$alias" ] || sed -i '/__none__/,/^}/d' "$WWW_DIR/Caddyfile"
+  ( cd "$WWW_DIR" && logrun docker compose up -d ) || die "The web server did not start." "Ports 80 or 443 may be taken by another program (then: ./gildsite-install answer WEB_SERVER existing); check $LOG."
   ok "Caddy running for $DOMAIN${alias:+ (and $alias redirects to it)}"
 }
 
@@ -373,17 +395,23 @@ mcp_check() { # does the panel answer AI Access with this key? (header from a 60
   rm -f "$hf"; echo "$code"
 }
 
+# Connector name: "gildsite"; when that name already points to another Gildsite (several instances on one server),
+# this one gets "gildsite-<instance>" so nothing is overwritten.
+CONNECTOR=gildsite
 client_claude() {
-  local url="$1" key; key=$(cat "$AI_KEY_FILE")
-  as_ai claude mcp remove gildsite -s user >/dev/null 2>&1 || true
-  as_ai claude mcp add --transport http --scope user gildsite "$url" --header "Authorization: Bearer $key" >> "$LOG" 2>&1
+  local url="$1" key cur; key=$(cat "$AI_KEY_FILE")
+  cur=$(as_ai claude mcp get gildsite 2>/dev/null | sed -n 's/^ *URL: *//p' | head -1 || true)
+  [ -n "$cur" ] && [ "$cur" != "$url" ] && CONNECTOR="gildsite-$(instance_name)"
+  as_ai claude mcp remove "$CONNECTOR" -s user >/dev/null 2>&1 || true
+  as_ai claude mcp add --transport http --scope user "$CONNECTOR" "$url" --header "Authorization: Bearer $key" >> "$LOG" 2>&1
 }
 client_codex() {
   local url="$1" f d; d="$(ai_home)/.codex"; f="$d/config.toml"
   as_ai mkdir -p "$d"; as_ai touch "$f"
+  if awk '/^\[mcp_servers\.gildsite\]/{s=1;next} /^\[/{s=0} s && /^url/' "$f" | grep -q . && ! awk '/^\[mcp_servers\.gildsite\]/{s=1;next} /^\[/{s=0} s && /^url/' "$f" | grep -qF "\"$url\""; then CONNECTOR="gildsite-$(instance_name)"; fi
   # Replace our own block only; everything else in the file stays as it was.
-  as_ai sh -c "awk 'BEGIN{s=0} /^\[mcp_servers\.gildsite\]/{s=1;next} /^\[/{s=0} !s' '$f' > '$f.tmp' && cat '$f.tmp' > '$f' && rm -f '$f.tmp' && chmod 600 '$f'"
-  { printf '\n[mcp_servers.gildsite]\nurl = "%s"\nhttp_headers = { Authorization = "Bearer %s" }\n' "$url" "$(cat "$AI_KEY_FILE")"; } | as_ai sh -c "cat >> '$f'"
+  as_ai sh -c "awk 'BEGIN{s=0} /^\[mcp_servers\.$CONNECTOR\]/{s=1;next} /^\[/{s=0} !s' '$f' > '$f.tmp' && cat '$f.tmp' > '$f' && rm -f '$f.tmp' && chmod 600 '$f'"
+  { printf '\n[mcp_servers.%s]\nurl = "%s"\nhttp_headers = { Authorization = "Bearer %s" }\n' "$CONNECTOR" "$url" "$(cat "$AI_KEY_FILE")"; } | as_ai sh -c "cat >> '$f'"
 }
 
 cmd_aurelius() {
@@ -405,12 +433,12 @@ cmd_aurelius() {
   code=$(mcp_check); [ "$code" = 200 ] && ok "Panel answers AI Access at $url" || warn "AI Access answered HTTP $code (check again after DNS and HTTPS work)"
   if [ "$client" = auto ]; then if as_ai_has claude; then client=claude; elif as_ai_has codex; then client=codex; else client=none; fi; fi
   case "$client" in
-    claude) client_claude "$url" || die "Adding the panel to Claude Code failed." "Check $LOG."; ok "Claude Code ($(ai_user)): panel added as connector \"gildsite\"" ;;
-    codex)  client_codex "$url" || die "Adding the panel to Codex failed." "Check $LOG."; ok "Codex ($(ai_user)): panel added as connector \"gildsite\" in ~/.codex/config.toml" ;;
+    claude) client_claude "$url" || die "Adding the panel to Claude Code failed." "Check $LOG."; ok "Claude Code ($(ai_user)): panel added as connector \"$CONNECTOR\"" ;;
+    codex)  client_codex "$url" || die "Adding the panel to Codex failed." "Check $LOG."; ok "Codex ($(ai_user)): panel added as connector \"$CONNECTOR\" in ~/.codex/config.toml" ;;
     none)   warn "No Claude Code or Codex found for $(ai_user). Add a connector by hand: address $url, header Authorization: Bearer <contents of $AI_KEY_FILE>." ;;
   esac
   mark_done aurelius
-  say ""; say "AURELIUS CONNECTED${client:+ ($client)}. Start a new AI session so it sees the \"gildsite\" tools. Next: ./gildsite-install github (optional) or finish"
+  say ""; say "AURELIUS CONNECTED${client:+ ($client)}. Start a new AI session so it sees the \"$CONNECTOR\" tools. Next: ./gildsite-install github (optional) or finish"
 }
 
 gh_() { env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="$GH_DIR" gh "$@"; }

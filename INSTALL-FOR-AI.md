@@ -37,6 +37,10 @@ Ask one at a time and save each answer:
 
 The panel lives on the same address under `/admin` (for example `www.yourcompany.com/admin`).
 
+If `check` said port 80 or 443 is already used (nginx or Apache runs here), ask: "This server already has a web
+server. Shall I keep it and give you a ready config file for it?" After a yes: `./gildsite-install answer WEB_SERVER existing`.
+The installer then writes `/srv/gildsite/nginx-<name>.conf` and does not touch nginx; hand that file to whoever runs the server.
+
 ### Step 2. Show the plan and ask for consent
 
 ```sh
