@@ -3,8 +3,12 @@
 # Read-only commands: check, plan, status, dns. Everything that changes the server needs `consent yes` first.
 set -euo pipefail
 umask 077
+# Started from a service or a background job, the shell may have no HOME and a short PATH: git (trusted folders),
+# Claude Code and Codex then look for their settings in the wrong place. Take HOME from the account itself.
+[ -n "${HOME:-}" ] || HOME=$(getent passwd "$(id -u)" | cut -d: -f6); export HOME="${HOME:-/root}"
+case ":$PATH:" in *:/bin:*) ;; *) PATH="$PATH:/bin";; esac; export PATH
 
-VERSION="0.7.0"
+VERSION="0.7.1"
 INSTALLER_DIR="$(cd "$(dirname "$0")" && pwd)"
 GILDSITE_HOME="${GILDSITE_HOME:-/srv/gildsite}"
 STATE_DIR="${GILDSITE_STATE_DIR:-$GILDSITE_HOME/.install}"
