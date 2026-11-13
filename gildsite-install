@@ -4,7 +4,7 @@
 set -euo pipefail
 umask 077
 
-VERSION="0.6.0"
+VERSION="0.7.0"
 INSTALLER_DIR="$(cd "$(dirname "$0")" && pwd)"
 GILDSITE_HOME="${GILDSITE_HOME:-/srv/gildsite}"
 STATE_DIR="${GILDSITE_STATE_DIR:-$GILDSITE_HOME/.install}"
@@ -36,7 +36,7 @@ die()   { printf 'ERROR: %s\nFIX: %s\n' "$1" "${2:-Run ./gildsite-install status
           [ -n "${ACTIVITY_ON:-}" ] && { activity error "$1"; progress_set failed "${RUN_STEP:-0}" "$1"; }; exit "${3:-1}"; }
 have()  { command -v "$1" >/dev/null 2>&1; }
 
-load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; DESIGN="${DESIGN:-off}"; RELEASE="${RELEASE:-latest}"; INSTANCE="${INSTANCE:-}"; GITHUB_REPO="${GITHUB_REPO:-}"; WEB_SERVER="${WEB_SERVER:-caddy}"; [ "${GILDSITE_WWW:-}" = none ] && WEB_SERVER=existing; true; }
+load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; DESIGN="${DESIGN:-off}"; RELEASE="${RELEASE:-latest}"; INSTANCE="${INSTANCE:-}"; GITHUB_REPO="${GITHUB_REPO:-}"; WEB_SERVER="${WEB_SERVER:-caddy}"; JOBS="${JOBS:-backup,knowledge,updates}"; OWNER_LINK="${OWNER_LINK:-yes}"; [ "${GILDSITE_WWW:-}" = none ] && WEB_SERVER=existing; true; }
 need_consent() { [ -f "$CONSENT" ] || die "The person has not agreed to the plan yet." "Run ./gildsite-install plan, explain it, and after a clear yes run ./gildsite-install consent yes." 2; }
 mark_done() { mkdir -p "$DONE_DIR"; date -u +%FT%TZ > "$DONE_DIR/$1"; }
 is_done() { [ -f "$DONE_DIR/$1" ]; }
@@ -89,8 +89,10 @@ cmd_answer() {
     RELEASE) [ -n "$val" ] || die "RELEASE is empty." "Use a release tag like v1.2.0, or latest." ;;
     INSTANCE) echo "$val" | grep -Eq '^[a-z][a-z0-9-]{1,29}$' || die "INSTANCE must be 2-30 small letters, digits or dashes." "Use something like firma." ;;
     WEB_SERVER) case "$val" in caddy|existing) ;; *) die "WEB_SERVER must be caddy or existing." "Use existing when nginx or Apache already serves ports 80 and 443 on this server.";; esac ;;
+    JOBS) echo "$val" | grep -Eq '^(none|(backup|knowledge|updates)(,(backup|knowledge|updates))*)$' || die "JOBS must be none or a list of backup, knowledge, updates." "Example: answer JOBS backup,knowledge (no night fixes)." ;;
+    OWNER_LINK) case "$val" in yes|no) ;; *) die "OWNER_LINK must be yes or no." "Use no when the owner signs in with Google and needs no password link.";; esac ;;
     GITHUB_REPO) echo "$val" | grep -Eq '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$' || die "\"$val\" is not a repository name." "Use owner/name, for example your-company/website." ;;
-    *) die "Unknown answer \"$key\"." "Use one of: DOMAIN, OWNER_EMAIL, COMPANY, DESIGN, RELEASE, INSTANCE, WEB_SERVER, GITHUB_REPO." ;;
+    *) die "Unknown answer \"$key\"." "Use one of: DOMAIN, OWNER_EMAIL, COMPANY, DESIGN, RELEASE, INSTANCE, WEB_SERVER, JOBS, OWNER_LINK, GITHUB_REPO." ;;
   esac
   mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"; touch "$ANSWERS"; chmod 600 "$ANSWERS"
   grep -v "^$key=" "$ANSWERS" > "$ANSWERS.tmp" || true
@@ -119,9 +121,12 @@ What will happen on this server:
   3. Start in Docker: website, panel, database, search, Aurelius engine$( [ "$DESIGN" = on ] && echo ", Design" ).
 $( if [ "$WEB_SERVER" = existing ]; then echo "  4. Keep the web server already running here (nginx or Apache): the installer writes a ready config file
      for it and does not change it. Whoever looks after that server adds the file and the HTTPS certificate."; echo "  5. The panel and website listen only inside the server; the existing web server passes visitors to them."; else echo "  4. Start the web server (Caddy) with an HTTPS certificate for the address."; echo "  5. Open only ports 80 and 443 for the website. The database and panel internals stay inside the server."; echo "     (An existing firewall is not changed.)"; fi )
-  6. Turn on a nightly backup of the database and photos (kept 7 days) and updates from the panel
-     (a dot and "Update now" when a new version is out; small fixes install by themselves at night).
-  7. Create the owner account for $OWNER_EMAIL and give a one-time link to set the password.
+  6. Updates from the panel: a dot and "Update now" when a new version is out (always on).
+     Scheduled jobs (the person chooses, now: ${JOBS}):
+       backup    = nightly backup of the database and photos at 3:30, kept 7 days
+       knowledge = Knowledge wiki refreshed every 15 minutes
+       updates   = small fixes install by themselves at night (4:30)
+  7. Create the owner account for $OWNER_EMAIL$( [ "$OWNER_LINK" = yes ] && echo " and give a one-time link to set the password" || echo " (sign-in without a password link, e.g. Google)" ).
 
 What will NOT happen:
   - No other programs or websites on this server are changed or stopped.
@@ -274,7 +279,8 @@ run_production() {
   cp -p "$e" "$e.przed-instalator-$(date -u +%Y%m%d%H%M%S)"
   sub=$(grep '^PODSIEC=' "$e" | cut -d= -f2 | sed 's#\.0/24##')
   # Test mode off: no fake Google, no sandbox profile (Google sign-in is set up later in Connectors).
-  dropenv "$e" TRYB COMPOSE_PROFILES PORT_GOOGLE GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_AUTH_URL GOOGLE_TOKEN_URL GOOGLE_USERINFO_URL GOOGLE_DOMENY
+  # PORT_GOOGLE stays: the fake Google service is off, but docker compose warns on every command when the value is missing.
+  dropenv "$e" TRYB COMPOSE_PROFILES GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET GOOGLE_AUTH_URL GOOGLE_TOKEN_URL GOOGLE_USERINFO_URL GOOGLE_DOMENY
   setenv "$e" DOMENA "${DOMAIN#www.}"
   setenv "$e" FIRMA "\"$COMPANY\""
   setenv "$e" ADRES_PUBLICZNY "https://$DOMAIN"
@@ -319,7 +325,9 @@ run_www() {
 run_backup() {
   local name dir; name=$(instance_name); dir=$(inst_dir)
   step "7/7 Nightly backup and updates"
-  if have systemctl && [ -d /run/systemd/system ]; then
+  if ! job_on backup; then
+    ok "Nightly backup: not turned on (the person chose so). Turn on later: ./gildsite-install answer JOBS ... and run again."
+  elif have systemctl && [ -d /run/systemd/system ]; then
     sudo_ tee /etc/systemd/system/gildsite-kopia-$name.service >/dev/null <<UNIT
 [Unit]
 Description=Gildsite nightly backup ($name)
@@ -341,6 +349,19 @@ UNIT
     warn "No systemd here: nightly backup not scheduled. Run $dir/skrypty/kopia-nocna.sh by hand or from cron."
   fi
   run_updates
+  jobs_apply
+}
+job_on() { case ",$JOBS," in *",$1,"*) return 0;; *) return 1;; esac; }
+# Timers made by other scripts (Knowledge wiki by nowy-klient.sh, night fixes by aktualizacje-instaluj.sh) follow the person's choice.
+jobs_apply() {
+  have systemctl && [ -d /run/systemd/system ] || return 0
+  local name; name=$(instance_name)
+  if ! job_on knowledge && systemctl list-unit-files "gildsite-wiedza-$name.timer" >/dev/null 2>&1; then
+    sudo_ systemctl disable --now "gildsite-wiedza-$name.timer" >> "$LOG" 2>&1 && ok "Knowledge refresh every 15 min: off (the person chose so)"
+  fi
+  if ! job_on updates && systemctl list-unit-files "gildsite-aktualizacje-noc-$name.timer" >/dev/null 2>&1; then
+    sudo_ systemctl disable --now "gildsite-aktualizacje-noc-$name.timer" >> "$LOG" 2>&1 && ok "Night fixes: off; new versions only through Update now"
+  fi
 }
 
 # Updates from the panel (Gildsite 1.3.0+): the panel shows a dot and "Update now" when gildsite.com lists a newer release;
@@ -360,7 +381,7 @@ run_updates() {
     warn "No download key saved: the panel will see new versions but cannot download them. Save the key with ./gildsite-install key and run again."
   fi
   if have systemctl && [ -d /run/systemd/system ]; then
-    ( cd "$dir" && sudo_ sh skrypty/aktualizacje-instaluj.sh >> "$LOG" 2>&1 ) && ok "Update now in the panel is on; small fixes install by themselves at night" \
+    ( cd "$dir" && sudo_ sh skrypty/aktualizacje-instaluj.sh >> "$LOG" 2>&1 ) && updates_home && ok "Update now in the panel is on" \
       || warn "Turning on updates from the panel failed; see $LOG. The site works; updates can be turned on later."
   else
     warn "No systemd here: Update now in the panel cannot run. Updates can still be run by hand: sh $dir/skrypty/aktualizacje-wykonawca.sh --noc"
@@ -368,6 +389,18 @@ run_updates() {
   ( cd "$dir" && sh skrypty/aktualizacje-wykonawca.sh --stan >> "$LOG" 2>&1 ) || true
   local v; v=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("wersja") or "")' "$dir/dane/home/aktualizacje/stan.json" 2>/dev/null || true)
   if [ -n "$v" ]; then ok "Installed version: $v"; else warn "The installed code has no release number yet; Update now works from the next release."; fi
+}
+
+# The update services run as root without HOME in releases before 1.4.0; git then does not see the trusted folder and stops.
+updates_home() {
+  local name u; name=$(instance_name)
+  for u in "gildsite-aktualizacje-$name.service" "gildsite-aktualizacje-noc-$name.service"; do
+    [ -f "/etc/systemd/system/$u" ] || continue
+    grep -q '^Environment=.*HOME=' "/etc/systemd/system/$u" && continue
+    sudo_ mkdir -p "/etc/systemd/system/$u.d"
+    printf '[Service]\nEnvironment=HOME=/root\n' | sudo_ tee "/etc/systemd/system/$u.d/gildsite-install-home.conf" >/dev/null
+  done
+  sudo_ systemctl daemon-reload
 }
 
 cmd_run() {
@@ -399,6 +432,12 @@ cmd_finish() {
   [ "$site" = 200 ] && ok "Website answers (https://$DOMAIN)" || bad "Website: HTTP $site"
   [ "$panel" = 200 ] && ok "Panel answers (https://$DOMAIN/admin)" || bad "Panel: HTTP $panel"
   { [ "$site" = 200 ] && [ "$panel" = 200 ]; } || die "Not everything answers yet." "Wait a minute and run ./gildsite-install finish again; if it stays, check $LOG."
+  if [ "$OWNER_LINK" = no ]; then
+    mark_done finish
+    say ""; say "DONE. The owner signs in at https://$pd/admin with $OWNER_EMAIL (no password link was made, as chosen)."
+    say "New versions: the panel shows a dot in the menu and the owner clicks Update now."
+    return
+  fi
   # One-time link: the owner sets their own password (no password ever goes through the chat).
   local token
   token=$(cd "$dir" && docker compose --profile narzedzia run --rm -T -e OWNER_EMAIL="$OWNER_EMAIL" -e TYLKO_LINK=1 narzedzia npx payload run tools/gildsite-install-wlasciciel.ts 2>/dev/null | sed -n 's/^LINK-TOKEN=//p' | tail -1)
@@ -407,7 +446,7 @@ cmd_finish() {
   say ""; say "DONE. Give the person this one-time link (valid 1 hour) to set their password:"
   say "  https://$pd/admin/reset/$token"
   say "After that they log in at https://$pd/admin and the panel guides them (Setup)."
-  say "New versions: the panel shows a dot in the menu and the owner clicks Update now; small fixes install by themselves at night."
+  say "New versions: the panel shows a dot in the menu and the owner clicks Update now$(job_on updates && echo "; small fixes install by themselves at night")."
 }
 
 # ---------- connections (steps "aurelius" and "github") ----------
@@ -428,7 +467,8 @@ connections() { # connections ENV...: run the server command in the tools contai
 # The AI client belongs to the person who runs the AI (with sudo: that user, not root).
 ai_user() { if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then echo "$SUDO_USER"; else id -un; fi; }
 ai_home() { [ -n "${GILDSITE_AI_HOME:-}" ] && { echo "$GILDSITE_AI_HOME"; return; }; getent passwd "$(ai_user)" | cut -d: -f6; }
-as_ai() { local u; u=$(ai_user); if [ "$u" = "$(id -un)" ]; then HOME="$(ai_home)" "$@"; else sudo -u "$u" -H "$@"; fi; }
+ai_path() { local h; h=$(ai_home); echo "$h/.local/bin:$h/.claude/local:$h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:$PATH"; }
+as_ai() { local u p; u=$(ai_user); p=$(ai_path); if [ "$u" = "$(id -un)" ]; then HOME="$(ai_home)" PATH="$p" "$@"; else sudo -u "$u" -H env PATH="$p" "$@"; fi; }
 as_ai_has() { as_ai sh -c "command -v $1" >/dev/null 2>&1; }
 
 mcp_check() { # does the panel answer AI Access with this key? (header from a 600 file, never on the command line)
@@ -663,7 +703,8 @@ usage() {
 Gildsite installer $VERSION. Read INSTALL-FOR-AI.md first.
 
   check [--json]        look at the server (read-only)
-  answer KEY VALUE      save DOMAIN, OWNER_EMAIL, COMPANY (also DESIGN on|off, RELEASE, INSTANCE)
+  answer KEY VALUE      save DOMAIN, OWNER_EMAIL, COMPANY (also DESIGN on|off, RELEASE, INSTANCE, WEB_SERVER,
+                        JOBS backup,knowledge,updates|none, OWNER_LINK yes|no, GITHUB_REPO)
   plan                  show what will happen (read-only)
   consent yes           record the person's yes (only after they said it)
   dns                   show DNS records and check them (read-only)
