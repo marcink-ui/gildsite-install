@@ -4,7 +4,7 @@
 set -euo pipefail
 umask 077
 
-VERSION="0.5.0"
+VERSION="0.6.0"
 INSTALLER_DIR="$(cd "$(dirname "$0")" && pwd)"
 GILDSITE_HOME="${GILDSITE_HOME:-/srv/gildsite}"
 STATE_DIR="${GILDSITE_STATE_DIR:-$GILDSITE_HOME/.install}"
@@ -119,7 +119,8 @@ What will happen on this server:
   3. Start in Docker: website, panel, database, search, Aurelius engine$( [ "$DESIGN" = on ] && echo ", Design" ).
 $( if [ "$WEB_SERVER" = existing ]; then echo "  4. Keep the web server already running here (nginx or Apache): the installer writes a ready config file
      for it and does not change it. Whoever looks after that server adds the file and the HTTPS certificate."; echo "  5. The panel and website listen only inside the server; the existing web server passes visitors to them."; else echo "  4. Start the web server (Caddy) with an HTTPS certificate for the address."; echo "  5. Open only ports 80 and 443 for the website. The database and panel internals stay inside the server."; echo "     (An existing firewall is not changed.)"; fi )
-  6. Turn on a nightly backup of the database and photos (kept 7 days).
+  6. Turn on a nightly backup of the database and photos (kept 7 days) and updates from the panel
+     (a dot and "Update now" when a new version is out; small fixes install by themselves at night).
   7. Create the owner account for $OWNER_EMAIL and give a one-time link to set the password.
 
 What will NOT happen:
@@ -192,11 +193,11 @@ run_source() {
     if [ ! -d "$SOURCE_DIR/.git" ]; then
       mkdir -p "$GILDSITE_HOME"; local src="$GILDSITE_SOURCE"
       # A folder owned by another user makes git refuse ("dubious ownership"), so a folder goes through a bundle file.
-      if [ -d "$src" ]; then src="$STATE_DIR/source.bundle"; logrun git -c safe.directory='*' -C "$GILDSITE_SOURCE" bundle create "$src" HEAD || die "Reading the local copy $GILDSITE_SOURCE failed." "Check $LOG."; fi
+      if [ -d "$src" ]; then src="$STATE_DIR/source.bundle"; logrun git -c safe.directory='*' -C "$GILDSITE_SOURCE" bundle create "$src" --all || die "Reading the local copy $GILDSITE_SOURCE failed." "Check $LOG."; fi
       logrun git clone -q "$src" "$SOURCE_DIR" || die "Copying the code from $GILDSITE_SOURCE failed." "Check $LOG."
       rm -f "$STATE_DIR/source.bundle"
     fi
-    ok "Code from local copy $GILDSITE_SOURCE"; return
+    pick_release "$RELEASE"; ok "Code from local copy $GILDSITE_SOURCE ($(release_name))"; return
   fi
   local url="https://github.com/$SOURCE_REPO.git" ref="$RELEASE"
   if [ ! -d "$SOURCE_DIR/.git" ]; then
@@ -204,15 +205,28 @@ run_source() {
     if have gh && gh auth status >/dev/null 2>&1 && gh repo view "$SOURCE_REPO" >/dev/null 2>&1; then
       logrun gh repo clone "$SOURCE_REPO" "$SOURCE_DIR" || die "Download from GitHub failed." "Check $LOG; then run again."
     elif [ -s "$KEY_FILE" ]; then
-      logrun git -c "http.extraHeader=Authorization: Basic $(printf 'x-access-token:%s' "$(cat "$KEY_FILE")" | base64 -w0)" clone "$url" "$SOURCE_DIR" \
+      logrun git -c "http.extraHeader=$(key_header)" clone "$url" "$SOURCE_DIR" \
         || die "Download from GitHub failed: the download key is wrong or expired." "Ask the person for a new download key and save it with ./gildsite-install key."
     else
       die "No access to the Gildsite code yet." "Ask the person for the download key they got with Gildsite, then save it with ./gildsite-install key (it reads the key from input, never print it)." 5
     fi
   fi
-  if [ "$ref" != latest ]; then logrun git -C "$SOURCE_DIR" fetch --tags -q || true; logrun git -C "$SOURCE_DIR" checkout -q "$ref" || die "Release $ref not found." "Use ./gildsite-install answer RELEASE latest, or a release that exists."; fi
-  ok "Code ready ($(git -C "$SOURCE_DIR" log -1 --format=%h))"
+  if [ -s "$KEY_FILE" ]; then logrun git -c "http.extraHeader=$(key_header)" -C "$SOURCE_DIR" fetch --tags -q || true
+  else logrun git -C "$SOURCE_DIR" fetch --tags -q || true; fi
+  pick_release "$ref"
+  ok "Code ready ($(release_name))"
 }
+key_header() { printf 'Authorization: Basic %s' "$(printf 'x-access-token:%s' "$(cat "$KEY_FILE")" | base64 -w0)"; }
+# "latest" = the newest release tag (vX.Y.Z), not whatever the default branch holds; without tags the newest code stays.
+pick_release() {
+  local ref="$1"
+  if [ "$ref" = latest ]; then
+    ref=$(git -C "$SOURCE_DIR" tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)
+    [ -n "$ref" ] || { warn "No Gildsite release found; using the newest code. Updates from the panel start with the first release."; return 0; }
+  fi
+  logrun git -C "$SOURCE_DIR" -c advice.detachedHead=false checkout -q "$ref" || die "Release $ref not found." "Use ./gildsite-install answer RELEASE latest, or a release that exists."
+}
+release_name() { git -C "$SOURCE_DIR" describe --tags --exact-match 2>/dev/null || git -C "$SOURCE_DIR" log -1 --format='code %h'; }
 
 run_deps() {
   step "3/7 Libraries (a few minutes)"
@@ -304,7 +318,7 @@ run_www() {
 
 run_backup() {
   local name dir; name=$(instance_name); dir=$(inst_dir)
-  step "7/7 Nightly backup"
+  step "7/7 Nightly backup and updates"
   if have systemctl && [ -d /run/systemd/system ]; then
     sudo_ tee /etc/systemd/system/gildsite-kopia-$name.service >/dev/null <<UNIT
 [Unit]
@@ -326,6 +340,34 @@ UNIT
   else
     warn "No systemd here: nightly backup not scheduled. Run $dir/skrypty/kopia-nocna.sh by hand or from cron."
   fi
+  run_updates
+}
+
+# Updates from the panel (Gildsite 1.3.0+): the panel shows a dot and "Update now" when gildsite.com lists a newer release;
+# small fixes install by themselves at night. The instance fetches new releases from GitHub with the same read-only
+# download key, kept only in this instance's own git settings (root only), never in the panel.
+run_updates() {
+  local dir; dir=$(inst_dir)
+  [ -f "$dir/skrypty/aktualizacje-wykonawca.sh" ] || { warn "This release has no updates from the panel yet (needs Gildsite 1.3.0 or newer)."; return 0; }
+  # The instance belongs to its own user; root runs the updates, so git has to trust this one folder.
+  git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$dir" || git config --global --add safe.directory "$dir"
+  git -C "$dir" remote get-url wzornik >/dev/null 2>&1 || logrun git -C "$dir" remote add wzornik "https://github.com/$SOURCE_REPO.git"
+  if [ -s "$KEY_FILE" ]; then
+    git -C "$dir" config "http.https://github.com/.extraHeader" "$(key_header)"; chmod 600 "$dir/.git/config"
+  elif have gh && gh auth status >/dev/null 2>&1; then
+    logrun gh auth setup-git || true
+  else
+    warn "No download key saved: the panel will see new versions but cannot download them. Save the key with ./gildsite-install key and run again."
+  fi
+  if have systemctl && [ -d /run/systemd/system ]; then
+    ( cd "$dir" && sudo_ sh skrypty/aktualizacje-instaluj.sh >> "$LOG" 2>&1 ) && ok "Update now in the panel is on; small fixes install by themselves at night" \
+      || warn "Turning on updates from the panel failed; see $LOG. The site works; updates can be turned on later."
+  else
+    warn "No systemd here: Update now in the panel cannot run. Updates can still be run by hand: sh $dir/skrypty/aktualizacje-wykonawca.sh --noc"
+  fi
+  ( cd "$dir" && sh skrypty/aktualizacje-wykonawca.sh --stan >> "$LOG" 2>&1 ) || true
+  local v; v=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("wersja") or "")' "$dir/dane/home/aktualizacje/stan.json" 2>/dev/null || true)
+  if [ -n "$v" ]; then ok "Installed version: $v"; else warn "The installed code has no release number yet; Update now works from the next release."; fi
 }
 
 cmd_run() {
@@ -365,6 +407,7 @@ cmd_finish() {
   say ""; say "DONE. Give the person this one-time link (valid 1 hour) to set their password:"
   say "  https://$pd/admin/reset/$token"
   say "After that they log in at https://$pd/admin and the panel guides them (Setup)."
+  say "New versions: the panel shows a dot in the menu and the owner clicks Update now; small fixes install by themselves at night."
 }
 
 # ---------- connections (steps "aurelius" and "github") ----------
@@ -493,7 +536,7 @@ cmd_github() {
 # Only the installer's own messages go into it, never raw build logs, so no secret can leak through the card.
 PROGRESS="$STATE_DIR/progress.env"
 ACTIVITY="$STATE_DIR/activity.log"
-RUN_STEPS=("Docker" "Gildsite code" "Libraries" "Website and panel" "Production settings and owner" "Web server and HTTPS" "Nightly backup")
+RUN_STEPS=("Docker" "Gildsite code" "Libraries" "Website and panel" "Production settings and owner" "Web server and HTTPS" "Backup and updates")
 RUN_MIN=(2 2 4 12 6 1 1)   # rough minutes per part, for "about N min left"
 
 activity() { [ -n "${ACTIVITY_ON:-}" ] || return 0; mkdir -p "$STATE_DIR"; printf '%s|%s|%s\n' "$(date -u +%H:%M)" "$1" "$2" >> "$ACTIVITY"; chmod 600 "$ACTIVITY" 2>/dev/null || true; }
