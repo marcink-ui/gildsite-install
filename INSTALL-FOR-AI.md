@@ -42,6 +42,14 @@ If `check` said port 80 or 443 is already used (nginx or Apache runs here), ask:
 server. Shall I keep it and give you a ready config file for it?" After a yes: `./gildsite-install answer WEB_SERVER existing`.
 The installer then writes `/srv/gildsite/nginx-<name>.conf` and does not touch nginx; hand that file to whoever runs the server.
 
+Then ask about scheduled jobs: "Should I turn on a nightly backup and a Knowledge refresh every 15 minutes?
+(Update now in the panel is always there.)" Save the choice, for example `./gildsite-install answer JOBS backup`.
+The default is `backup,knowledge`; `none` turns both off. Night fixes (`updates`) installing by themselves are
+off for now: add them only if the person asks.
+
+If the owner will sign in with Google (a sign-in gate already in front of the panel), no password link is needed:
+`./gildsite-install answer OWNER_LINK no`.
+
 ### Step 2. Show the plan and ask for consent
 
 ```sh
@@ -123,8 +131,8 @@ No token goes through the chat; the panel keeps its own encrypted copy and the i
 ```
 
 It checks that the website and the panel answer, then prints a one-time login link for the
-owner. Also tell the person how updates work: "When a new Gildsite version is out, the panel shows a dot
-in the menu; you click Update now. Small fixes install by themselves at night." Give the person that link and say: "Log in here. The panel will guide you through
+owner (skipped when OWNER_LINK is no). Also tell the person how updates work: "When a new Gildsite version is out, the panel shows a dot
+in the menu; you click Update now." Give the person that link and say: "Log in here. The panel will guide you through
 the rest (company details, languages, sign-in, Aurelius)."
 
 ## Progress card
