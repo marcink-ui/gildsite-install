@@ -123,7 +123,8 @@ No token goes through the chat; the panel keeps its own encrypted copy and the i
 ```
 
 It checks that the website and the panel answer, then prints a one-time login link for the
-owner. Give the person that link and say: "Log in here. The panel will guide you through
+owner. Also tell the person how updates work: "When a new Gildsite version is out, the panel shows a dot
+in the menu; you click Update now. Small fixes install by themselves at night." Give the person that link and say: "Log in here. The panel will guide you through
 the rest (company details, languages, sign-in, Aurelius)."
 
 ## Progress card
