@@ -8,7 +8,7 @@ umask 077
 [ -n "${HOME:-}" ] || HOME=$(getent passwd "$(id -u)" | cut -d: -f6); export HOME="${HOME:-/root}"
 case ":$PATH:" in *:/bin:*) ;; *) PATH="$PATH:/bin";; esac; export PATH
 
-VERSION="0.7.1"
+VERSION="0.7.2"
 INSTALLER_DIR="$(cd "$(dirname "$0")" && pwd)"
 GILDSITE_HOME="${GILDSITE_HOME:-/srv/gildsite}"
 STATE_DIR="${GILDSITE_STATE_DIR:-$GILDSITE_HOME/.install}"
@@ -40,7 +40,7 @@ die()   { printf 'ERROR: %s\nFIX: %s\n' "$1" "${2:-Run ./gildsite-install status
           [ -n "${ACTIVITY_ON:-}" ] && { activity error "$1"; progress_set failed "${RUN_STEP:-0}" "$1"; }; exit "${3:-1}"; }
 have()  { command -v "$1" >/dev/null 2>&1; }
 
-load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; DESIGN="${DESIGN:-off}"; RELEASE="${RELEASE:-latest}"; INSTANCE="${INSTANCE:-}"; GITHUB_REPO="${GITHUB_REPO:-}"; WEB_SERVER="${WEB_SERVER:-caddy}"; JOBS="${JOBS:-backup,knowledge,updates}"; OWNER_LINK="${OWNER_LINK:-yes}"; [ "${GILDSITE_WWW:-}" = none ] && WEB_SERVER=existing; true; }
+load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; DESIGN="${DESIGN:-off}"; RELEASE="${RELEASE:-latest}"; INSTANCE="${INSTANCE:-}"; GITHUB_REPO="${GITHUB_REPO:-}"; WEB_SERVER="${WEB_SERVER:-caddy}"; JOBS="${JOBS:-backup,knowledge}"; OWNER_LINK="${OWNER_LINK:-yes}"; [ "${GILDSITE_WWW:-}" = none ] && WEB_SERVER=existing; true; }
 need_consent() { [ -f "$CONSENT" ] || die "The person has not agreed to the plan yet." "Run ./gildsite-install plan, explain it, and after a clear yes run ./gildsite-install consent yes." 2; }
 mark_done() { mkdir -p "$DONE_DIR"; date -u +%FT%TZ > "$DONE_DIR/$1"; }
 is_done() { [ -f "$DONE_DIR/$1" ]; }
@@ -129,7 +129,7 @@ $( if [ "$WEB_SERVER" = existing ]; then echo "  4. Keep the web server already 
      Scheduled jobs (the person chooses, now: ${JOBS}):
        backup    = nightly backup of the database and photos at 3:30, kept 7 days
        knowledge = Knowledge wiki refreshed every 15 minutes
-       updates   = small fixes install by themselves at night (4:30)
+       updates   = small fixes install by themselves at night (4:30; off by default for now)
   7. Create the owner account for $OWNER_EMAIL$( [ "$OWNER_LINK" = yes ] && echo " and give a one-time link to set the password" || echo " (sign-in without a password link, e.g. Google)" ).
 
 What will NOT happen:
@@ -194,6 +194,12 @@ run_docker() {
   sudo_ systemctl enable --now docker >> "$LOG" 2>&1 || true
   docker info >/dev/null 2>&1 || die "Docker is installed but not running." "Restart the server once, then run ./gildsite-install run again."
   ok "Docker installed"
+}
+# The update script compares screenshots before and after with Python + Pillow on the server itself.
+run_pillow() {
+  python3 -c 'import PIL' 2>/dev/null && return 0
+  have apt-get && sudo_ apt-get install -y python3-pil >> "$LOG" 2>&1 && ok "Python image library installed (used to check updates)" \
+    || warn "Python image library (python3-pil) missing: updates still work, but the before/after screenshot check reports an error."
 }
 
 run_source() {
@@ -414,7 +420,7 @@ cmd_run() {
   mkdir -p "$STATE_DIR"; touch "$LOG"; chmod 600 "$LOG"
   say "Installing Gildsite. Details go to $LOG. Progress card: ./gildsite-install progress"
   ACTIVITY_ON=1; progress_set running 1 "starting"
-  run_docker; run_source; run_deps; run_instance; run_production; run_www; run_backup
+  run_docker; run_pillow; run_source; run_deps; run_instance; run_production; run_www; run_backup
   mark_done run; progress_set done 8 "installed"; activity ok "Gildsite installed"
   say ""; say "INSTALLED. Next: ./gildsite-install finish"
 }
