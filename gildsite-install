@@ -8,7 +8,7 @@ umask 077
 [ -n "${HOME:-}" ] || HOME=$(getent passwd "$(id -u)" | cut -d: -f6); export HOME="${HOME:-/root}"
 case ":$PATH:" in *:/bin:*) ;; *) PATH="$PATH:/bin";; esac; export PATH
 
-VERSION="0.7.2"
+VERSION="0.8.0"
 INSTALLER_DIR="$(cd "$(dirname "$0")" && pwd)"
 GILDSITE_HOME="${GILDSITE_HOME:-/srv/gildsite}"
 STATE_DIR="${GILDSITE_STATE_DIR:-$GILDSITE_HOME/.install}"
@@ -26,6 +26,7 @@ STEPS=(
   "consent|Get the person's yes for the plan"
   "dns|Point the address to this server"
   "run|Install and start Gildsite in Docker, HTTPS, nightly backups"
+  "design|Connect Design at its own address design.<domain> (on unless the person said no)"
   "aurelius|Connect Aurelius to the AI on this server (optional)"
   "github|Connect GitHub for issues and pull requests (optional)"
   "finish|Check everything answers, give the owner a login link"
@@ -40,7 +41,7 @@ die()   { printf 'ERROR: %s\nFIX: %s\n' "$1" "${2:-Run ./gildsite-install status
           [ -n "${ACTIVITY_ON:-}" ] && { activity error "$1"; progress_set failed "${RUN_STEP:-0}" "$1"; }; exit "${3:-1}"; }
 have()  { command -v "$1" >/dev/null 2>&1; }
 
-load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; DESIGN="${DESIGN:-off}"; RELEASE="${RELEASE:-latest}"; INSTANCE="${INSTANCE:-}"; GITHUB_REPO="${GITHUB_REPO:-}"; WEB_SERVER="${WEB_SERVER:-caddy}"; JOBS="${JOBS:-backup,knowledge}"; OWNER_LINK="${OWNER_LINK:-yes}"; [ "${GILDSITE_WWW:-}" = none ] && WEB_SERVER=existing; true; }
+load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; DESIGN="${DESIGN:-on}"; case "$DESIGN" in no|off) DESIGN=off;; *) DESIGN=on;; esac; DESIGN_IMAGE="${DESIGN_IMAGE:-}"; RELEASE="${RELEASE:-latest}"; INSTANCE="${INSTANCE:-}"; GITHUB_REPO="${GITHUB_REPO:-}"; WEB_SERVER="${WEB_SERVER:-caddy}"; JOBS="${JOBS:-backup,knowledge}"; OWNER_LINK="${OWNER_LINK:-yes}"; [ "${GILDSITE_WWW:-}" = none ] && WEB_SERVER=existing; true; }
 need_consent() { [ -f "$CONSENT" ] || die "The person has not agreed to the plan yet." "Run ./gildsite-install plan, explain it, and after a clear yes run ./gildsite-install consent yes." 2; }
 mark_done() { mkdir -p "$DONE_DIR"; date -u +%FT%TZ > "$DONE_DIR/$1"; }
 is_done() { [ -f "$DONE_DIR/$1" ]; }
@@ -89,14 +90,15 @@ cmd_answer() {
     DOMAIN) echo "$val" | grep -Eq '^([a-z0-9-]+\.)+[a-z]{2,}$' || die "\"$val\" does not look like a website address." "Ask for an address like www.company.com (no https://, no slash)." ;;
     OWNER_EMAIL) echo "$val" | grep -Eq '^[^@ ]+@[^@ ]+\.[^@ ]+$' || die "\"$val\" does not look like an e-mail." "Ask for the owner's e-mail again." ;;
     COMPANY) [ -n "$val" ] || die "Company name is empty." "Ask for the company name." ;;
-    DESIGN) case "$val" in on|off) ;; *) die "DESIGN must be on or off." "Use: answer DESIGN on";; esac ;;
+    DESIGN) case "$val" in yes|no|on|off) ;; *) die "DESIGN must be yes or no." "Use: answer DESIGN no to skip Design (it is on by default).";; esac ;;
+    DESIGN_IMAGE) echo "$val" | grep -Eq '^[A-Za-z0-9./:@_-]+$' || die "DESIGN_IMAGE must be an image name, an image file or a source folder." "Example: answer DESIGN_IMAGE /root/design-image.tar" ;;
     RELEASE) [ -n "$val" ] || die "RELEASE is empty." "Use a release tag like v1.2.0, or latest." ;;
     INSTANCE) echo "$val" | grep -Eq '^[a-z][a-z0-9-]{1,29}$' || die "INSTANCE must be 2-30 small letters, digits or dashes." "Use something like firma." ;;
     WEB_SERVER) case "$val" in caddy|existing) ;; *) die "WEB_SERVER must be caddy or existing." "Use existing when nginx or Apache already serves ports 80 and 443 on this server.";; esac ;;
     JOBS) echo "$val" | grep -Eq '^(none|(backup|knowledge|updates)(,(backup|knowledge|updates))*)$' || die "JOBS must be none or a list of backup, knowledge, updates." "Example: answer JOBS backup,knowledge (no night fixes)." ;;
     OWNER_LINK) case "$val" in yes|no) ;; *) die "OWNER_LINK must be yes or no." "Use no when the owner signs in with Google and needs no password link.";; esac ;;
     GITHUB_REPO) echo "$val" | grep -Eq '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$' || die "\"$val\" is not a repository name." "Use owner/name, for example your-company/website." ;;
-    *) die "Unknown answer \"$key\"." "Use one of: DOMAIN, OWNER_EMAIL, COMPANY, DESIGN, RELEASE, INSTANCE, WEB_SERVER, JOBS, OWNER_LINK, GITHUB_REPO." ;;
+    *) die "Unknown answer \"$key\"." "Use one of: DOMAIN, OWNER_EMAIL, COMPANY, DESIGN, DESIGN_IMAGE, RELEASE, INSTANCE, WEB_SERVER, JOBS, OWNER_LINK, GITHUB_REPO." ;;
   esac
   mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"; touch "$ANSWERS"; chmod 600 "$ANSWERS"
   grep -v "^$key=" "$ANSWERS" > "$ANSWERS.tmp" || true
@@ -116,6 +118,7 @@ PLAN (nothing has been changed yet)
 
 Website:  https://$DOMAIN
 Panel:    https://$DOMAIN/admin
+Design:   $( [ "$DESIGN" = on ] && echo "https://design.${DOMAIN#www.} (needs a second DNS record)" || echo "not connected (the person said no)" )
 Owner:    $OWNER_EMAIL
 Company:  $COMPANY
 
@@ -131,6 +134,9 @@ $( if [ "$WEB_SERVER" = existing ]; then echo "  4. Keep the web server already 
        knowledge = Knowledge wiki refreshed every 15 minutes
        updates   = small fixes install by themselves at night (4:30; off by default for now)
   7. Create the owner account for $OWNER_EMAIL$( [ "$OWNER_LINK" = yes ] && echo " and give a one-time link to set the password" || echo " (sign-in without a password link, e.g. Google)" ).
+$( if [ "$DESIGN" = on ]; then echo "  8. Connect Design (the design studio inside the panel): its own containers and database, its own address
+     design.${DOMAIN#www.} with HTTPS, open only to the panel (no sign-up from outside, hidden from search engines).
+     Random keys, kept in files only root can read. Without its DNS record Design waits; the website works anyway."; else echo "  8. Design: skipped (the person said no). It can be connected later."; fi )
 
 What will NOT happen:
   - No other programs or websites on this server are changed or stopped.
@@ -157,10 +163,14 @@ cmd_dns() {
   say "Add at the domain provider (DNS settings):"
   say "  Type A   Name: $DOMAIN   Value: $ip"
   [ -n "$bare" ] && say "  Type A   Name: $bare   Value: $ip   (optional: the address without www then opens the site too)"
+  [ "$DESIGN" = on ] && say "  Type A   Name: $(design_host)   Value: $ip   (Design; without it Design waits, the website works anyway)"
   say ""
   local got; got=$(resolve "$DOMAIN")
   if [ "$got" = "$ip" ]; then ok "$DOMAIN points to this server"; else warn "$DOMAIN ${got:+points to $got}${got:-is not set yet}"; fi
   if [ -n "$bare" ]; then local g2; g2=$(resolve "$bare"); [ "$g2" = "$ip" ] && ok "$bare points to this server" || warn "$bare not pointing here (optional)"; fi
+  if [ "$DESIGN" = on ]; then
+    if design_dns_ok "$ip"; then ok "$(design_host) points to this server"; else warn "$(design_host) not pointing here yet (needed for Design)"; fi
+  fi
   if [ "$got" = "$ip" ]; then mark_done dns; say "DNS READY. Next: ./gildsite-install run"; else say "Waiting for DNS. New records usually work within 5–30 minutes. Run this again in a minute or two."; return 4; fi
 }
 
@@ -178,7 +188,7 @@ instance_name() { local n="${INSTANCE:-}"; [ -n "$n" ] || n=$(echo "${DOMAIN#www
 inst_dir() { echo "${GILDSITE_CLIENTS_DIR:-/srv/klienci}/$(instance_name)"; }
 sudo_() { if [ "$(id -u)" = 0 ]; then "$@"; else sudo "$@"; fi; }
 step() { printf '\n== %s\n' "$*"; printf '\n== %s %s\n' "$(date -u +%FT%TZ)" "$*" >> "$LOG"
-  case "$*" in [1-7]/7*) RUN_STEP=${1%%/*}; progress_set running "$RUN_STEP" "$*";; esac; activity step "Working on: ${*#[1-7]/7 }"; }
+  case "$*" in [1-8]/8*) RUN_STEP=${1%%/*}; progress_set running "$RUN_STEP" "$*";; esac; activity step "Working on: ${*#[1-8]/8 }"; }
 logrun() { "$@" >> "$LOG" 2>&1; }
 # Proxy settings of the server (if any) are passed to build and install containers.
 proxy_args() { local v; for v in HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do [ -n "${!v:-}" ] && printf -- '--build-arg %s=%s ' "$v" "${!v}"; done; true; }
@@ -188,7 +198,7 @@ setenv() { # setenv FILE KEY VALUE: replace or add one line in a .env file
 dropenv() { local f="$1"; shift; local k; for k in "$@"; do grep -v "^$k=" "$f" > "$f.tmp" || true; cat "$f.tmp" > "$f"; rm -f "$f.tmp"; done; }
 
 run_docker() {
-  step "1/7 Docker"
+  step "1/8 Docker"
   if have docker && docker info >/dev/null 2>&1; then ok "Docker is running"; return; fi
   have docker || { say "Installing Docker (official script from get.docker.com)…"; curl -fsSL https://get.docker.com | sudo_ sh >> "$LOG" 2>&1 || die "Docker could not be installed." "Show the person the last lines of $LOG."; }
   sudo_ systemctl enable --now docker >> "$LOG" 2>&1 || true
@@ -203,7 +213,7 @@ run_pillow() {
 }
 
 run_source() {
-  step "2/7 Gildsite code ($RELEASE)"
+  step "2/8 Gildsite code ($RELEASE)"
   if [ -n "${GILDSITE_SOURCE:-}" ]; then # local copy (tests, or a server without GitHub access)
     if [ ! -d "$SOURCE_DIR/.git" ]; then
       mkdir -p "$GILDSITE_HOME"; local src="$GILDSITE_SOURCE"
@@ -244,7 +254,7 @@ pick_release() {
 release_name() { git -C "$SOURCE_DIR" describe --tags --exact-match 2>/dev/null || git -C "$SOURCE_DIR" log -1 --format='code %h'; }
 
 run_deps() {
-  step "3/7 Libraries (a few minutes)"
+  step "3/8 Libraries (a few minutes)"
   # shellcheck disable=SC2046
   if docker image inspect klient-node:22 >/dev/null 2>&1; then ok "Base image already there"; else
     logrun docker build --network host $(proxy_args) -t klient-node:22 "$SOURCE_DIR/obraz" || die "Building the base image failed." "Check internet access from the server and $LOG."
@@ -262,7 +272,7 @@ run_deps() {
 
 run_instance() {
   local name dir; name=$(instance_name); dir=$(inst_dir)
-  step "4/7 Website and panel ($name), first build (10–20 minutes)"
+  step "4/8 Website and panel ($name), first build (10–20 minutes)"
   if [ -f "$dir/.env" ] && docker ps --format '{{.Names}}' | grep -q "^$name-panel$"; then models_owner "$dir"; ok "Instance $name already exists"; return; fi
   [ -e "$dir" ] && die "Folder $dir exists but the instance is not running." "Do not delete it. Tell Marcin; the folder may hold someone's data."
   sudo_ mkdir -p "$(dirname "$dir")"
@@ -284,7 +294,7 @@ models_owner() { local d="$1" u; u=$(grep '^UID_KLIENTA=' "$d/.env" | cut -d= -f
 
 run_production() {
   local name dir e sub; name=$(instance_name); dir=$(inst_dir); e="$dir/.env"
-  step "5/7 Production settings and owner account"
+  step "5/8 Production settings and owner account"
   if is_done production; then ok "Already in production mode"; return; fi
   cp -p "$e" "$e.przed-instalator-$(date -u +%Y%m%d%H%M%S)"
   sub=$(grep '^PODSIEC=' "$e" | cut -d= -f2 | sed 's#\.0/24##')
@@ -312,7 +322,7 @@ run_www() {
   sub=$(grep '^PODSIEC=' "$dir/.env" | cut -d= -f2 | sed 's#\.0/24##')
   local alias=""; case "$DOMAIN" in www.*) alias="${DOMAIN#www.}";; esac
   if [ "$WEB_SERVER" = existing ]; then
-    step "6/7 Config for the existing web server (not changed by the installer)"
+    step "6/8 Config for the existing web server (not changed by the installer)"
     local pp ps f="$GILDSITE_HOME/nginx-$name.conf"
     pp=$(grep '^PORT_PANEL=' "$dir/.env" | cut -d= -f2); ps=$(grep '^PORT_STRONA=' "$dir/.env" | cut -d= -f2)
     sed -e "s#__DOMAIN__#$DOMAIN#g" -e "s#__ALIAS__#${alias}#g" -e "s#__PORT_PANEL__#$pp#g" -e "s#__PORT_STRONA__#$ps#g" \
@@ -321,20 +331,36 @@ run_www() {
     warn "Whoever looks after this server copies it to /etc/nginx/sites-available/, runs nginx -t, reloads nginx and adds HTTPS (certbot --nginx -d $DOMAIN${alias:+ -d $alias})."
     return
   fi
-  step "6/7 Web server with HTTPS (Caddy)"
+  step "6/8 Web server with HTTPS (Caddy)"
   mkdir -p "$WWW_DIR"
-  sed -e "s#__DOMAIN__#$DOMAIN#g" -e "s#__ALIAS__#${alias:-__none__}#g" -e "s#__EMAIL__#$OWNER_EMAIL#g" \
-      -e "s#__TLS__#${GILDSITE_TLS:+tls $GILDSITE_TLS}#g" "$INSTALLER_DIR/templates/Caddyfile.template" > "$WWW_DIR/Caddyfile"
-  [ -n "$alias" ] || sed -i '/__none__/,/^}/d' "$WWW_DIR/Caddyfile"
+  caddyfile_write
   sed -e "s#__NAME__#$name#g" -e "s#__IP__#$sub.250#g" "$INSTALLER_DIR/templates/www-compose.yml" > "$WWW_DIR/docker-compose.yml"
-  chmod 644 "$WWW_DIR/Caddyfile" "$WWW_DIR/docker-compose.yml"
+  chmod 644 "$WWW_DIR/docker-compose.yml"
   ( cd "$WWW_DIR" && logrun docker compose up -d ) || die "The web server did not start." "Ports 80 or 443 may be taken by another program (then: ./gildsite-install answer WEB_SERVER existing); check $LOG."
   ok "Caddy running for $DOMAIN${alias:+ (and $alias redirects to it)}"
+}
+# The whole Caddyfile is written from the templates each time: website and panel, the address without www, and the
+# Design address once its DNS record was checked. Written in place (same file), because Caddy sees it through a mount.
+caddyfile_write() {
+  local alias="" tmp tls="${GILDSITE_TLS:+tls $GILDSITE_TLS}"; case "$DOMAIN" in www.*) alias="${DOMAIN#www.}";; esac
+  tmp=$(mktemp)
+  sed -e "s#__DOMAIN__#$DOMAIN#g" -e "s#__ALIAS__#${alias:-__none__}#g" -e "s#__EMAIL__#$OWNER_EMAIL#g" \
+      -e "s#__TLS__#$tls#g" "$INSTALLER_DIR/templates/Caddyfile.template" > "$tmp"
+  [ -n "$alias" ] || sed -i '/__none__/,/^}/d' "$tmp"
+  if [ "$DESIGN" = on ] && is_done design-www; then
+    sed -e "s#__DOMAIN__#$DOMAIN#g" -e "s#__DESIGN_HOST__#$(design_host)#g" -e "s#__TLS__#$tls#g" \
+      "$INSTALLER_DIR/templates/Caddyfile-design.template" >> "$tmp"
+  fi
+  cat "$tmp" > "$WWW_DIR/Caddyfile"; rm -f "$tmp"; chmod 644 "$WWW_DIR/Caddyfile"
+}
+caddy_reload() {
+  ( cd "$WWW_DIR" && logrun docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile ) \
+    || ( cd "$WWW_DIR" && logrun docker compose up -d --force-recreate )
 }
 
 run_backup() {
   local name dir; name=$(instance_name); dir=$(inst_dir)
-  step "7/7 Nightly backup and updates"
+  step "7/8 Nightly backup and updates"
   if ! job_on backup; then
     ok "Nightly backup: not turned on (the person chose so). Turn on later: ./gildsite-install answer JOBS ... and run again."
   elif have systemctl && [ -d /run/systemd/system ]; then
@@ -413,6 +439,115 @@ updates_home() {
   sudo_ systemctl daemon-reload
 }
 
+# ---------- Design (step 8/8 of "run", and "design" on its own) ----------
+# Design (Doop) next to every instance, like on the reference server: its own containers and its own database in
+# /srv/doop-<instance>, joined to the instance network with the alias "design", at its own address design.<domain>.
+# The panel shows it in a frame and talks to it inside the server (http://design:4400) with a shared key.
+# Every secret is made here at random and kept only in two .env files only root can read: never logged, never in git.
+DESIGN_IMAGE_DEFAULT="${GILDSITE_DESIGN_IMAGE:-ghcr.io/marcink-ui/gildweave-design:latest}"
+design_host() { echo "design.${DOMAIN#www.}"; }
+design_dir() { echo "${GILDSITE_DESIGN_DIR:-/srv/doop-$(instance_name)}"; }
+design_dns_ok() { [ -n "${GILDSITE_SKIP_DNS:-}" ] && return 0; local ip="${1:-}"; [ -n "$ip" ] || ip=$(public_ip); [ -n "$ip" ] && [ "$(resolve "$(design_host)")" = "$ip" ]; }
+rand_hex() { if have openssl; then openssl rand -hex "$1"; else od -An -tx1 -N "$1" /dev/urandom | tr -d ' \n'; fi; }
+# Design waits (no image, no DNS yet, …): the website keeps working, the reason is said once, `design` tries again later.
+design_skip() { DESIGN_SKIPPED="$1"; warn "Design waits: $1"; say "        $2"; activity warn "$2"; }
+
+design_image() { # prints the image to use: from an image file, a source folder (built here) or a registry
+  local src="${DESIGN_IMAGE:-$DESIGN_IMAGE_DEFAULT}" ref
+  if [ -f "$src" ]; then
+    ref=$(docker load -i "$src" 2>>"$LOG" | sed -n 's/^Loaded image: //p' | tail -1)
+    [ -n "$ref" ] && echo "$ref"; return
+  fi
+  if [ -d "$src" ]; then
+    [ -f "$src/Dockerfile" ] || return 1
+    # shellcheck disable=SC2046
+    logrun docker build --network host $(proxy_args) -t gildsite-design:local "$src" && echo gildsite-design:local; return
+  fi
+  docker image inspect "$src" >/dev/null 2>&1 && { echo "$src"; return 0; }
+  logrun docker pull "$src" && { echo "$src"; return 0; }
+  # A private registry: sign in with the read-only download key for this one download, in a throwaway folder,
+  # so no login stays on the server. The key goes in through input, never on the command line.
+  [ -s "$KEY_FILE" ] || return 1
+  local reg="${src%%/*}" cfg rc=0; case "$reg" in *.*|*:*) ;; *) return 1;; esac
+  cfg=$(mktemp -d)
+  { DOCKER_CONFIG="$cfg" docker login "$reg" -u x-access-token --password-stdin < "$KEY_FILE" >> "$LOG" 2>&1 \
+      && DOCKER_CONFIG="$cfg" logrun docker pull "$src"; } || rc=1
+  rm -rf "$cfg"
+  [ "$rc" = 0 ] && echo "$src"; return "$rc"
+}
+
+free_port() { local p; for p in $(seq "${1:-4401}" 4499); do port_busy "$p" || { echo "$p"; return 0; }; done; return 1; }
+http_ok() { curl -s --noproxy '*' -o /dev/null -w '%{http_code}' "$@" 2>/dev/null | grep -qE '^(200|30[0-9])$'; }
+wait_ok() { local n="$1" i; shift; for i in $(seq 1 "$n"); do http_ok "$@" && return 0; [ "$i" -lt "$n" ] && sleep 3; done; return 1; }
+
+run_design() {
+  local name dir d host img port e key pp ip="${GILDSITE_TEST_IP:-127.0.0.1}"
+  name=$(instance_name); dir=$(inst_dir); d=$(design_dir); host=$(design_host); e="$dir/.env"
+  step "8/8 Design ($host)"
+  DESIGN_SKIPPED=""
+  if [ "$DESIGN" != on ]; then ok "Design: not connected (the person said no). Later: answer DESIGN yes, plan, consent, then ./gildsite-install design."; return 0; fi
+  if [ ! -f "$e" ] || ! docker network inspect "$name-net" >/dev/null 2>&1; then
+    design_skip "the instance $name is not running yet." "Run ./gildsite-install run first."; return 0
+  fi
+
+  # Part 1: containers. Needs no DNS.
+  img=$(design_image) || img=""
+  [ -n "$img" ] || { design_skip "the Design image could not be found (${DESIGN_IMAGE:-$DESIGN_IMAGE_DEFAULT})." \
+    "Save the download key (./gildsite-install key), or give an image file or source folder: ./gildsite-install answer DESIGN_IMAGE <file or folder>. Then ./gildsite-install design."; return 0; }
+  sudo_ mkdir -p "$d"; sudo_ chown "$(id -u):$(id -g)" "$d"; chmod 700 "$d"
+  if [ ! -s "$d/.env" ]; then
+    ( umask 077; { printf 'PG_HASLO=%s\n' "$(rand_hex 24)"; printf 'BETTER_AUTH_SECRET=%s\n' "$(rand_hex 32)"; printf 'GILDWEAVE_KLUCZ=%s\n' "$(rand_hex 32)"; } > "$d/.env" )
+  fi
+  chmod 600 "$d/.env"
+  setenv "$d/.env" BETTER_AUTH_URL "https://$host"
+  port=$(sed -n 's/^DESIGN_PORT=//p' "$d/.env" | tail -1)
+  [ -n "$port" ] || { port=$(free_port) || die "No free port for Design between 4401 and 4499." "Tell the person; another program uses them."; setenv "$d/.env" DESIGN_PORT "$port"; }
+  sed -e "s#__NAME__#$name#g" -e "s#__IMAGE__#$img#g" -e "s#__PORT__#$port#g" "$INSTALLER_DIR/templates/design-compose.yml" > "$d/docker-compose.yml"
+  chmod 644 "$d/docker-compose.yml"
+  ( cd "$d" && logrun docker compose up -d ) || { design_skip "its containers did not start." "Check $LOG, then ./gildsite-install design."; return 0; }
+  wait_ok 40 "http://127.0.0.1:$port/" || { docker logs --tail 15 "$name-design-app-1" >> "$LOG" 2>&1 || true
+    design_skip "Design started but does not answer." "Check $LOG, then ./gildsite-install design."; return 0; }
+  ok "Design runs inside the server ($img)"
+
+  # Part 2: its address. Caddy gets the certificate only after the DNS record points here.
+  if [ "$WEB_SERVER" = existing ]; then
+    local f="$GILDSITE_HOME/nginx-design-$name.conf"
+    sed -e "s#__DOMAIN__#$DOMAIN#g" -e "s#__DESIGN_HOST__#$host#g" -e "s#__PORT__#$port#g" \
+      "$INSTALLER_DIR/templates/nginx-design.conf.template" > "$f"; chmod 644 "$f"
+    ok "nginx config for Design written: $f"
+    warn "Whoever looks after this server adds it like the website file, with HTTPS (certbot --nginx -d $host)."
+  else
+    design_dns_ok || { design_skip "$host does not point to this server yet." \
+      "Add the DNS record (./gildsite-install dns shows it). When it points here, run ./gildsite-install design."; return 0; }
+    mark_done design-www; caddyfile_write; caddy_reload || die "The web server did not take the Design address." "Check $LOG."
+    wait_ok 40 ${GILDSITE_TLS:+"-k"} --resolve "$host:443:$ip" "https://$host/" \
+      || { design_skip "no HTTPS certificate for $host yet." "Wait a few minutes, then ./gildsite-install design."; return 0; }
+    ok "Design answers at https://$host"
+  fi
+
+  # Part 3: the panel learns where Design is. Copy of its .env first; the key goes from file to file only.
+  key=$(sed -n 's/^GILDWEAVE_KLUCZ=//p' "$d/.env" | tail -1)
+  if [ "$(sed -n 's/^DESIGN_KLUCZ=//p' "$e" | tail -1)" != "$key" ] || ! grep -qxF "DESIGN_PUBLICZNY=https://$host" "$e" || ! grep -qxF "DESIGN_ADRES=http://design:4400" "$e"; then
+    cp -p "$e" "$e.przed-design-$(date -u +%Y%m%d%H%M%S)"
+    setenv "$e" DESIGN_ADRES "http://design:4400"; setenv "$e" DESIGN_KLUCZ "$key"; setenv "$e" DESIGN_PUBLICZNY "https://$host"
+    ( cd "$dir" && logrun docker compose up -d panel ) || die "The panel did not restart with Design." "Check $LOG; the copy of its settings is next to $e."
+  fi
+  key=""
+  if [ "$WEB_SERVER" = existing ]; then pp=$(sed -n 's/^PORT_PANEL=//p' "$e" | tail -1); wait_ok 60 "http://127.0.0.1:$pp/admin/login"
+  else wait_ok 60 ${GILDSITE_TLS:+"-k"} --resolve "$DOMAIN:443:$ip" "https://$DOMAIN/admin/login"; fi \
+    || die "The panel does not answer after connecting Design." "Wait a minute and run ./gildsite-install design again; if it stays, check $LOG."
+  mark_done design; ok "Panel connected to Design (no sign-up from outside, hidden from search engines)"
+}
+
+cmd_design() {
+  need_consent; load_answers; ACTIVITY_ON=1
+  is_done run || die "Gildsite is not installed yet." "Run ./gildsite-install run first (it connects Design too)."
+  mkdir -p "$STATE_DIR"; touch "$LOG"; chmod 600 "$LOG"
+  run_design; progress_set "done" 9 "design"
+  if [ -n "${DESIGN_SKIPPED:-}" ]; then say ""; say "DESIGN=WAITING: $DESIGN_SKIPPED Run ./gildsite-install design again when that is fixed."; return 4; fi
+  [ "$DESIGN" = on ] && { say ""; say "DESIGN CONNECTED. The owner finds it in the panel."; }; true
+}
+
 cmd_run() {
   need_consent; load_answers
   [ -n "$DOMAIN" ] && [ -n "$OWNER_EMAIL" ] && [ -n "$COMPANY" ] || die "Answers are missing." "Run ./gildsite-install plan."
@@ -420,9 +555,10 @@ cmd_run() {
   mkdir -p "$STATE_DIR"; touch "$LOG"; chmod 600 "$LOG"
   say "Installing Gildsite. Details go to $LOG. Progress card: ./gildsite-install progress"
   ACTIVITY_ON=1; progress_set running 1 "starting"
-  run_docker; run_pillow; run_source; run_deps; run_instance; run_production; run_www; run_backup
-  mark_done run; progress_set done 8 "installed"; activity ok "Gildsite installed"
+  run_docker; run_pillow; run_source; run_deps; run_instance; run_production; run_www; run_backup; run_design
+  mark_done run; progress_set "done" 9 "installed"; activity ok "Gildsite installed"
   say ""; say "INSTALLED. Next: ./gildsite-install finish"
+  [ -n "${DESIGN_SKIPPED:-}" ] && say "Design waits ($DESIGN_SKIPPED) The website works; run ./gildsite-install design when that is fixed."; true
 }
 
 cmd_key() {
@@ -586,8 +722,8 @@ cmd_github() {
 # Only the installer's own messages go into it, never raw build logs, so no secret can leak through the card.
 PROGRESS="$STATE_DIR/progress.env"
 ACTIVITY="$STATE_DIR/activity.log"
-RUN_STEPS=("Docker" "Gildsite code" "Libraries" "Website and panel" "Production settings and owner" "Web server and HTTPS" "Backup and updates")
-RUN_MIN=(2 2 4 12 6 1 1)   # rough minutes per part, for "about N min left"
+RUN_STEPS=("Docker" "Gildsite code" "Libraries" "Website and panel" "Production settings and owner" "Web server and HTTPS" "Backup and updates" "Design")
+RUN_MIN=(2 2 4 12 6 1 1 3)   # rough minutes per part, for "about N min left"
 
 activity() { [ -n "${ACTIVITY_ON:-}" ] || return 0; mkdir -p "$STATE_DIR"; printf '%s|%s|%s\n' "$(date -u +%H:%M)" "$1" "$2" >> "$ACTIVITY"; chmod 600 "$ACTIVITY" 2>/dev/null || true; }
 progress_set() { [ -n "${ACTIVITY_ON:-}" ] || return 0; mkdir -p "$STATE_DIR"; { printf 'P_STATE=%q\nP_STEP=%q\nP_MSG=%q\nP_AT=%q\n' "$1" "${2:-0}" "${3:-}" "$(date -u +%s)"; } > "$PROGRESS.tmp"; mv "$PROGRESS.tmp" "$PROGRESS"; }
@@ -605,6 +741,8 @@ progress_data() { # fills the P_* and C_* variables the three formats print
     elif [ "$P_STATE" = running ] && [ "$P_STEP" -eq $((i+1)) ]; then s=now
     elif [ "$P_STATE" = failed ] && [ "$P_STEP" -eq $((i+1)) ]; then s=failed
     else s=todo; fi
+    # Design can wait for its DNS record after the rest is installed.
+    if [ "${RUN_STEPS[$i]}" = Design ] && [ "$s" = "done" ] && [ "$DESIGN" = on ] && ! is_done design; then s=todo; fi
     add "${RUN_STEPS[$i]}" "$s" ""
   done
   is_done aurelius && s=done || s=todo; add "Connect Aurelius (optional)" "$s" ""
@@ -626,6 +764,7 @@ progress_data() { # fills the P_* and C_* variables the three formats print
   elif [ ! -f "$CONSENT" ]; then C_MOVE="Read the plan and say yes or no."
   elif ! is_done dns && [ -z "${GILDSITE_SKIP_DNS:-}" ]; then C_MOVE="Add one DNS record at your domain provider (see the chat)."
   elif [ "$P_STATE" = running ]; then C_MOVE="Nothing. You can close this; I will write when it is done."
+  elif [ "$DESIGN" = on ] && is_done run && ! is_done design && [ "$WEB_SERVER" != existing ]; then C_MOVE="Design waits: usually its DNS record $(design_host) is missing (see the chat)."
   elif is_done finish; then C_MOVE="Open your one-time login link and set a password."
   else C_MOVE="Nothing for now."; fi
   C_AGO=$(( $(date -u +%s) - P_AT )); [ "$P_AT" -gt 0 ] || C_AGO=-1
@@ -713,13 +852,14 @@ usage() {
 Gildsite installer $VERSION. Read INSTALL-FOR-AI.md first.
 
   check [--json]        look at the server (read-only)
-  answer KEY VALUE      save DOMAIN, OWNER_EMAIL, COMPANY (also DESIGN on|off, RELEASE, INSTANCE, WEB_SERVER,
+  answer KEY VALUE      save DOMAIN, OWNER_EMAIL, COMPANY (also DESIGN yes|no, DESIGN_IMAGE, RELEASE, INSTANCE, WEB_SERVER,
                         JOBS backup,knowledge,updates|none, OWNER_LINK yes|no, GITHUB_REPO)
   plan                  show what will happen (read-only)
   consent yes           record the person's yes (only after they said it)
   dns                   show DNS records and check them (read-only)
   key                   save the download key from input (needs consent; never print it)
   run                   install and start everything (needs consent)
+  design                connect Design at design.<domain> again (needs consent; after its DNS record or a fix)
   aurelius [claude|codex|none]  connect Aurelius to the AI on this server (needs consent)
   github                connect GitHub (needs consent and answer GITHUB_REPO; run again after the person confirms)
   finish                final check and owner login link (needs consent)
@@ -735,6 +875,7 @@ case "${1:-}" in
   consent)  shift; cmd_consent "${1:-}" ;;
   dns)      cmd_dns ;;
   run)      cmd_run ;;
+  design)   cmd_design ;;
   key)      cmd_key ;;
   finish)   cmd_finish ;;
   aurelius) shift; cmd_aurelius "${1:-}" ;;

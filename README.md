@@ -18,7 +18,7 @@ About 10 minutes of your time. The installation itself takes 15–25 minutes.
 ## What you need
 
 - A server with Ubuntu or Debian, at least 8 GB of memory and 30 GB of free disk.
-- A domain name you can edit (to add one DNS record).
+- A domain name you can edit (to add two DNS records: the website and `design.<your domain>`).
 - Optional: a GitHub account, if you want feedback and code changes to go there.
 
 ## Safety
@@ -27,4 +27,4 @@ About 10 minutes of your time. The installation itself takes 15–25 minutes.
 - Passwords and keys are stored only in files on the server, never shown in the chat.
 - Other programs on the server are not touched.
 
-Status: version 0.6.0. Installing the website and panel works, installs the newest release, turns on updates from the panel, with a live progress card for the chat (tested on a clean machine and on a server that already runs nginx). Connecting Aurelius (Claude Code, Codex) works and needs Gildsite 9cbf11d or newer. Connecting GitHub uses a device login and still has to be tried on a real server.
+Status: version 0.8.0. Installing the website and panel works, installs the newest release, turns on updates from the panel, with a live progress card for the chat (tested on a clean machine and on a server that already runs nginx). New in 0.8.0: Design is connected on every installation at `design.<your domain>` (not yet tried on a real server). Connecting Aurelius (Claude Code, Codex) works and needs Gildsite 9cbf11d or newer. Connecting GitHub uses a device login and still has to be tried on a real server. Changes: see CHANGELOG.md.
