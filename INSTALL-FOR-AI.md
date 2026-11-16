@@ -50,6 +50,11 @@ off for now: add them only if the person asks.
 If the owner will sign in with Google (a sign-in gate already in front of the panel), no password link is needed:
 `./gildsite-install answer OWNER_LINK no`.
 
+Design (the design studio inside the panel) is connected by default at its own address `design.<domain>`
+(for `www.yourcompany.com` that is `design.yourcompany.com`). Do not ask about it; only if the person says they do not
+want Design: `./gildsite-install answer DESIGN no`. The Design program comes with the download key, like the Gildsite code.
+If the person got Design as an image file instead, save its path: `./gildsite-install answer DESIGN_IMAGE /root/design-image.tar`.
+
 ### Step 2. Show the plan and ask for consent
 
 ```sh
@@ -69,8 +74,8 @@ Only after a clear yes:
 ./gildsite-install dns
 ```
 
-It prints the record to add at the domain provider (one A record; the address without www is optional). Tell the person exactly where to
-click (their provider's DNS settings) and what to type. Then wait: run `./gildsite-install dns`
+It prints the records to add at the domain provider (an A record for the address, a second one for `design.<domain>`;
+the address without www is optional). Tell the person exactly where to click (their provider's DNS settings) and what to type. Then wait: run `./gildsite-install dns`
 again every minute or two until it says the address points to this server.
 
 ### Step 4. Install
@@ -90,8 +95,12 @@ Then run `./gildsite-install run` again. Never repeat the key back in the chat.
 
 This installs Docker if needed, downloads the Gildsite release, starts everything in
 Docker (website, panel, database, search), sets up the web server (Caddy) with
-HTTPS, and turns on nightly backups. It can take 15–25 minutes. It is safe to run again:
+HTTPS, turns on nightly backups and connects Design. It can take 15–25 minutes. It is safe to run again:
 finished parts are skipped.
+
+Design never stops the install. If its DNS record is not there yet (or its image is missing), `run` ends with
+"Design waits" and the reason. The website and panel work anyway. When the reason is fixed, run
+`./gildsite-install design` (it prints `DESIGN=WAITING` and the reason until it works, then `DESIGN CONNECTED`).
 
 ### Step 5. Connect Aurelius to you (optional, recommended)
 

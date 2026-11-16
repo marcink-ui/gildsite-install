@@ -1,0 +1,26 @@
+
+# Design (Doop) at its own address, added by gildsite-install after its DNS record was checked.
+# Only the panel at https://__DOMAIN__ may show it in a frame; search engines are told not to index it.
+__DESIGN_HOST__ {
+	__TLS__
+	encode zstd gzip
+	request_body {
+		max_size 50MB
+	}
+	header {
+		defer
+		Content-Security-Policy "frame-ancestors https://__DOMAIN__"
+		X-Robots-Tag "noindex, nofollow"
+		-X-Frame-Options
+	}
+	# Live editing uses a WebSocket at /ws. Caddy passes the upgrade on by itself; no buffering for it.
+	@ws path /ws /ws/*
+	handle @ws {
+		reverse_proxy design:4400 {
+			flush_interval -1
+		}
+	}
+	handle {
+		reverse_proxy design:4400
+	}
+}
