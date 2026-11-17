@@ -8,8 +8,8 @@ Your job: guide them through a short chat, ask for consent once, then let the
 ## Golden rules
 
 1. **Speak the person's language**, in short, plain sentences. No jargon. One question at a time.
-2. **Nothing changes before consent.** Run only read-only commands (`check`, `plan`, `dns`, `status`, `docker-help`) until the person says yes to the plan. Then record it with `consent yes`.
-3. **Never print secrets.** Passwords, tokens and keys stay in files the script writes (mode 600). Never echo them into the chat, never ask the person to paste a token into the chat.
+2. **Nothing changes before consent.** Run only read-only commands (`check`, `plan`, `dns`, `status`, `docker-help`, `ai`) until the person says yes to the plan. Then record it with `consent yes`.
+3. **Never print secrets.** Passwords, tokens and keys stay in files the script writes (mode 600). Never echo them into the chat, never ask the person to paste a token into the chat. An AI API key is typed by the person into the installer's secure field (`ai-key`), never into the chat.
 4. **Only the script changes the server.** Do not install, delete or reconfigure anything by hand. If a step fails, show the person the one-line reason from the script and the fix it suggests.
 5. **Do not touch other services** already running on this server. If `check` reports a conflict (busy port 80/443, low memory), stop and explain the choice in one sentence.
 6. **Show progress as a card.** Run `./gildsite-install progress` and show its card in the chat after every step and
@@ -62,6 +62,44 @@ off for now: add them only if the person asks.
 
 If the owner will sign in with Google (a sign-in gate already in front of the panel), no password link is needed:
 `./gildsite-install answer OWNER_LINK no`.
+
+### Step 1b. Your AI
+
+Ask: **"Which AI should Aurelius, your assistant in the panel, use: Claude (recommended), OpenAI, Gemini, Grok, or
+another one?"**
+
+| Answer | Save with |
+|---|---|
+| Claude (recommended) | `./gildsite-install answer AI claude` |
+| OpenAI (ChatGPT) | `./gildsite-install answer AI openai` |
+| Gemini | `./gildsite-install answer AI gemini` |
+| Grok | `./gildsite-install answer AI grok` |
+| Another provider with an API key, or a model on their own machine | `./gildsite-install answer AI other`, then `answer AI_URL <API address>` and `answer AI_NAME "<name>"` |
+
+When the person picks anything other than Claude, say this one honest sentence (in their language): "It works best with
+Claude, because Aurelius's engine is Claude Code. <their choice> gets the same rules and panel tools, but some skills may
+work less well." Then respect the choice.
+
+Logging in. Two ways; the installer picks the usual one (Claude, OpenAI, Gemini: the provider's window; Grok, another:
+a key). To change it: `answer AI_LOGIN window` or `answer AI_LOGIN key`.
+
+```sh
+./gildsite-install ai
+```
+
+- **The provider's window**: `ai` says what the person types in a terminal on this machine (for example
+  `claude auth login`) and a window or link opens at the provider. The login link or code stays in that terminal and the
+  browser. When the provider's program is not here, `ai` says how to get it, or switch to a key.
+- **A key**: `ai` says where the person makes the key. The person types it **themselves, in their own terminal** on this
+  machine: `./gildsite-install ai-key` (the key is not shown while typing; it goes to a file only this account can read).
+  Never ask for the key in the chat and never run `ai-key` with a key yourself. If the person pastes a key into the chat
+  anyway, do not use it or repeat it: ask them to delete that key at the provider and make a new one.
+- **A model on their own machine** (for example Ollama at `http://127.0.0.1:11434`) usually needs no key: `ai` tests it
+  right away.
+
+Run `./gildsite-install ai` again until it says `AI=READY`: the connection was tested and the choice is saved where the
+panel sees it (never the key). `AI=WAITING` means the person still has to do the step it shows. The person can change
+the AI later; it does not cancel their yes to the plan.
 
 ### Step 2. Show the plan and ask for consent
 
@@ -160,9 +198,9 @@ Nothing goes on the internet, so there is no DNS record and no HTTPS step. The i
    "done" after each. Then `check` again. Also when Docker may use less than 8 GB (Docker Desktop: Settings, Resources).
    Windows without WSL: `docker-help` first shows how to get WSL.
 3. Ask for the owner e-mail and the company name (`answer OWNER_EMAIL`, `answer COMPANY`). The website address is
-   optional now; it is needed only for publishing.
+   optional now; it is needed only for publishing. Then ask about the AI, exactly as in "Step 1b. Your AI" above.
 4. `./gildsite-install plan`, retell it, ask for a yes, then `consent yes`. `dns` only says nothing is needed.
-5. `./gildsite-install run`. **Installer 0.9.0 checks Docker and stops there with a clear message**: installing on a
+5. `./gildsite-install run`. **This installer version checks Docker and stops there with a clear message**: installing on a
    computer comes with the next installer version. Tell the person the computer is ready and the answers are saved.
 
 Later, after the first page, ask where the website should go public:

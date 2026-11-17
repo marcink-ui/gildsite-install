@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.10.0 (2026-11-17)
+
+- New step "Your AI": `answer AI claude|openai|gemini|grok|other`. Claude is recommended (Aurelius's engine is Claude
+  Code); for any other choice the installer says one honest sentence: it gets the same rules and panel tools, but some
+  skills may work less well. `other` = any provider with an API key (`answer AI_URL`, `answer AI_NAME`) or a model on
+  the person's own machine (for example Ollama), often without a key.
+- Two ways to log in (`answer AI_LOGIN window|key`): the provider's own window (Claude Code, Codex, Gemini CLI) or an API
+  key. The key goes only through the new secure field `ai-key`: the person types it in their own terminal, it is not
+  shown and lands in a file only this account can read. Never in the chat, the command line, the log or git.
+- New command `ai` (read-only for the server): checks the login or tests the connection (it asks the provider for its
+  list of models, nothing is sent to a model) and says `AI=READY` or `AI=WAITING` with the next step for the person.
+- The choice (never the key) is saved in `ai.json` and, on a server where Gildsite already runs, in the instance as
+  `dane/home/gildsite-ai.json` (`/app/.home/gildsite-ai.json` in the panel). The plan, `status` and the progress card
+  show the AI once it is chosen. Changing the AI later does not cancel the earlier yes.
+- `aurelius` (auto) picks Codex when the chosen AI is OpenAI and Codex is there.
+- Without an AI answer everything works exactly as in 0.9.0, on a server and on a computer.
+
 ## 0.9.0 (2026-11-17)
 
 - First question: where Gildsite runs. `answer TARGET server` (a server, as before) or `answer TARGET local` (the
