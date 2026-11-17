@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.11.0 (2026-11-17)
+
+- GitHub as early as possible: new answer `GITHUB yes|skip`, asked right after "where?". The guide explains why in plain
+  words (a copy of every version, feedback and updates, a move in one click) and helps make an account
+  (https://github.com/signup) when there is none.
+- With `GITHUB yes`, `github` may run before the yes to the plan: GitHub's own device login in the browser (no password or
+  token in the chat), then it makes the person's **private** repository (`answer GITHUB_REPO <name>`; the name alone is
+  enough, the signed-in account is the owner; default `<address or company>-website`). An existing private repository
+  is reused, a public one with that name is refused. Nothing on the server changes before the yes; on a server without
+  `gh` the tool is added after the yes.
+- At the end of `run` the panel's feedback goes to GitHub by itself: Gildsite's feedback channel
+  (`GILDSITE_FEEDBACK_REPO`, default `marcink-ui/gildsite-feedback`), or the person's private repository when that one is
+  not open to their account. The token goes to the panel only through a file (600) removed right after; the installer
+  then signs out of GitHub. A GitHub problem never stops the install: it says what to run.
+- Needed for Cloudflare: `answer PUBLISH cloudflare` asks for `GITHUB yes` first, and `GITHUB skip` is refused while
+  publishing on Cloudflare. On a server and a computer it can be skipped; the plan, `status` and `finish` remind.
+- The plan, `status` and the progress card show GitHub once it is answered. GitHub answers do not cancel the earlier yes.
+- Fix (also for the old path): `--skip-ssh-key` is passed to `gh auth login` only when `gh` knows it (`gh` 2.23 from
+  Debian 12 stopped on it, so the device login never started).
+- Without a `GITHUB` answer everything works exactly as in 0.10.0, including `answer GITHUB_REPO owner/name` and
+  `github` after the install.
+
 ## 0.10.0 (2026-11-17)
 
 - New step "Your AI": `answer AI claude|openai|gemini|grok|other`. Claude is recommended (Aurelius's engine is Claude

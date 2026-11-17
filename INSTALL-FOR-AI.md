@@ -9,6 +9,8 @@ Your job: guide them through a short chat, ask for consent once, then let the
 
 1. **Speak the person's language**, in short, plain sentences. No jargon. One question at a time.
 2. **Nothing changes before consent.** Run only read-only commands (`check`, `plan`, `dns`, `status`, `docker-help`, `ai`) until the person says yes to the plan. Then record it with `consent yes`.
+   One exception: after the person said yes to GitHub (`answer GITHUB yes`), `github` may run before the plan: it only
+   signs in on GitHub and makes their private repository there. Nothing on the server changes.
 3. **Never print secrets.** Passwords, tokens and keys stay in files the script writes (mode 600). Never echo them into the chat, never ask the person to paste a token into the chat. An AI API key is typed by the person into the installer's secure field (`ai-key`), never into the chat.
 4. **Only the script changes the server.** Do not install, delete or reconfigure anything by hand. If a step fails, show the person the one-line reason from the script and the fix it suggests.
 5. **Do not touch other services** already running on this server. If `check` reports a conflict (busy port 80/443, low memory), stop and explain the choice in one sentence.
@@ -29,6 +31,39 @@ Ask: **"Where should Gildsite run: on a server on the internet, or on your own c
 On a Mac the installer already assumes `local`. Without an answer on Linux it assumes `server`, so existing
 installations work as before. On a computer, follow "On the person's own computer" below; the rest of this guide is the
 server path.
+
+### Step 0a. GitHub (right after "Where?")
+
+Explain in two plain sentences why: **"GitHub keeps a copy of every version of your website, carries your feedback and
+updates, and lets you move the website to another place with one click. It is free."** Then ask: **"Shall I connect your
+GitHub? If you have no account yet, I will help you make one."**
+
+| Answer | Save with |
+|---|---|
+| Yes (strongly recommended) | `./gildsite-install answer GITHUB yes` |
+| Not now | `./gildsite-install answer GITHUB skip` |
+
+- **Publishing on Cloudflare needs GitHub**: there it cannot be skipped (`answer PUBLISH cloudflare` asks for
+  `GITHUB yes` first). On a server or a computer it is strongly recommended; when the person says "not now", respect it
+  and say they can add it any time. The plan, `status` and `finish` remind them.
+- Ask for the name of the private repository, or suggest one (for example `company-website`):
+  `./gildsite-install answer GITHUB_REPO <name>`. Without an answer the installer picks `<address or company>-website`.
+
+```sh
+./gildsite-install github
+```
+
+- `GITHUB=WAITING` with a short code: tell the person "Open https://github.com/login/device, sign in, type the code <code>
+  and click Authorize." **No account yet**: first https://github.com/signup; the person chooses the name and password
+  themselves in the browser. Never ask for a password, code from an e-mail or token in the chat.
+- `GITHUB=WAITING` without a code: the GitHub tool (`gh`) is missing. On a computer the person installs it in their
+  own terminal (the line `github` shows). On a server the installer adds it after the yes to the plan: then run
+  `github` again, before `run`.
+- Run `./gildsite-install github` again after the person says done. `GITHUB=READY` means signed in and the private
+  repository is there (made, or found when it already exists; a public one with that name is refused).
+- The panel's feedback channel goes to GitHub by itself at the end of `run` (Gildsite's feedback channel; when that one
+  is not open to the person's account, their own private repository). The installer then signs out of GitHub: the panel
+  keeps its own encrypted copy.
 
 ### Step 0b. Look around (read-only)
 
@@ -163,6 +198,9 @@ The chat window inside the panel uses an API key the person enters in the panel.
 
 ### Step 6. Connect GitHub (optional)
 
+Only when GitHub was not done in Step 0a (no `answer GITHUB`, or `skip`). With `GITHUB yes` this already happened in
+`run`; if `run` warned about GitHub, run `./gildsite-install github` again.
+
 Ask first: "Shall I connect GitHub, so feedback from the panel goes there as issues?" Then ask which
 repository (owner/name) and save it:
 
@@ -197,7 +235,7 @@ Nothing goes on the internet, so there is no DNS record and no HTTPS step. The i
    Run `./gildsite-install docker-help` (read-only) and walk the person through it **one step at a time**, waiting for
    "done" after each. Then `check` again. Also when Docker may use less than 8 GB (Docker Desktop: Settings, Resources).
    Windows without WSL: `docker-help` first shows how to get WSL.
-3. Ask for the owner e-mail and the company name (`answer OWNER_EMAIL`, `answer COMPANY`). The website address is
+3. GitHub as in "Step 0a. GitHub" above, right after "Where?". Then ask for the owner e-mail and the company name (`answer OWNER_EMAIL`, `answer COMPANY`). The website address is
    optional now; it is needed only for publishing. Then ask about the AI, exactly as in "Step 1b. Your AI" above.
 4. `./gildsite-install plan`, retell it, ask for a yes, then `consent yes`. `dns` only says nothing is needed.
 5. `./gildsite-install run`. **This installer version checks Docker and stops there with a clear message**: installing on a
@@ -208,7 +246,7 @@ Later, after the first page, ask where the website should go public:
 | Answer | Save with |
 |---|---|
 | "On a server" | `./gildsite-install answer PUBLISH server` |
-| "Cloudflare (free hosting for the website)" | `./gildsite-install answer PUBLISH cloudflare` |
+| "Cloudflare (free hosting for the website)" | `./gildsite-install answer PUBLISH cloudflare` (needs `GITHUB yes` and a finished `github`) |
 
 The person can change this choice later in the chat with Aurelius; it does not cancel their earlier yes. Publishing
 itself asks for its own yes. Any key or token for publishing goes only through the installer's secure input (like

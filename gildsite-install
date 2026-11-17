@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Gildsite installer. Run by an AI on the server, which talks to the person (see INSTALL-FOR-AI.md).
-# Read-only commands: check, plan, status, dns, docker-help, ai. Everything that changes the server needs `consent yes` first.
+# Read-only commands: check, plan, status, dns, docker-help, ai. github before consent only signs in and makes a private
+# repository on GitHub (after the person said yes to GitHub); it changes nothing on the server. Everything that changes the server needs `consent yes` first.
 set -euo pipefail
 umask 077
 # Started from a service or a background job, the shell may have no HOME and a short PATH: git (trusted folders),
@@ -8,7 +9,7 @@ umask 077
 [ -n "${HOME:-}" ] || HOME=$(getent passwd "$(id -u)" | cut -d: -f6); export HOME="${HOME:-/root}"
 case ":$PATH:" in *:/bin:*) ;; *) PATH="$PATH:/bin";; esac; export PATH
 
-VERSION="0.10.0"
+VERSION="0.11.0"
 INSTALLER_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # What kind of machine this is: mac, wsl (Windows with WSL), linux, windows (Windows without WSL) or other.
@@ -42,6 +43,7 @@ MIN_DISK_GB="${MIN_DISK_GB:-30}"
 
 STEPS=(
   "check|Look at the server (memory, disk, ports, Docker)"
+  "github_account|GitHub: account and private repository (strongly recommended; needed for Cloudflare)"
   "answers|Save the website address, owner e-mail and company name"
   "ai|Your AI: choose it and log in (Claude recommended)"
   "consent|Get the person's yes for the plan"
@@ -62,7 +64,7 @@ die()   { printf 'ERROR: %s\nFIX: %s\n' "$1" "${2:-Run ./gildsite-install status
 have()  { command -v "$1" >/dev/null 2>&1; }
 
 default_target() { case "$(computer_kind)" in mac|windows) echo local ;; *) echo server ;; esac; }
-load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; TARGET="${TARGET:-$(default_target)}"; PUBLISH="${PUBLISH:-}"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; DESIGN="${DESIGN:-off}"; RELEASE="${RELEASE:-latest}"; INSTANCE="${INSTANCE:-}"; GITHUB_REPO="${GITHUB_REPO:-}"; WEB_SERVER="${WEB_SERVER:-caddy}"; JOBS="${JOBS:-backup,knowledge}"; OWNER_LINK="${OWNER_LINK:-yes}"; [ "${GILDSITE_WWW:-}" = none ] && WEB_SERVER=existing
+load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; TARGET="${TARGET:-$(default_target)}"; PUBLISH="${PUBLISH:-}"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; DESIGN="${DESIGN:-off}"; RELEASE="${RELEASE:-latest}"; INSTANCE="${INSTANCE:-}"; GITHUB_REPO="${GITHUB_REPO:-}"; WEB_SERVER="${WEB_SERVER:-caddy}"; JOBS="${JOBS:-backup,knowledge}"; OWNER_LINK="${OWNER_LINK:-yes}"; GITHUB="${GITHUB:-}"; [ "${GILDSITE_WWW:-}" = none ] && WEB_SERVER=existing
   AI="${AI:-}"; AI_URL="${AI_URL:-}"; AI_NAME="${AI_NAME:-}"; AI_LOGIN="${AI_LOGIN:-$(ai_default_login "$AI")}"
   [ "$AI_LOGIN" = window ] && ! ai_window_ok "$AI" && AI_LOGIN=key; true; }
 need_consent() { [ -f "$CONSENT" ] || die "The person has not agreed to the plan yet." "Run ./gildsite-install plan, explain it, and after a clear yes run ./gildsite-install consent yes." 2; }
@@ -360,7 +362,11 @@ cmd_answer() {
             # First answer on a computer: keep the installer's files in ~/gildsite instead of /srv/gildsite.
             if [ "$val" = local ] && [ -n "$HOME_AUTO" ] && [ ! -f "$ANSWERS" ] && [ "$GILDSITE_HOME" = /srv/gildsite ]; then set_home "$HOME/gildsite"; fi ;;
     PUBLISH) case "$val" in server|cloudflare) ;; *) die "PUBLISH must be server or cloudflare." "Use: answer PUBLISH cloudflare (or server).";; esac
-             load_answers; [ "$TARGET" = local ] || die "PUBLISH is only for an installation on a computer." "On a server the website is already public at its address; nothing to choose." ;;
+             load_answers; [ "$TARGET" = local ] || die "PUBLISH is only for an installation on a computer." "On a server the website is already public at its address; nothing to choose."
+             if [ "$val" = cloudflare ] && [ "$GITHUB" != yes ]; then die "Publishing on Cloudflare needs GitHub." "Do the GitHub step first: answer GITHUB yes, then ./gildsite-install github. Or choose answer PUBLISH server."; fi ;;
+    GITHUB) case "$val" in yes|skip) ;; *) die "GITHUB must be yes or skip." "Use: answer GITHUB yes (strongly recommended). skip only when the person does not want GitHub now.";; esac
+            load_answers; if [ "$val" = skip ] && [ "$PUBLISH" = cloudflare ]; then die "GitHub cannot be skipped: the website is published on Cloudflare, which needs GitHub." "Keep answer GITHUB yes, or choose answer PUBLISH server first."; fi
+            if [ "$val" = skip ] && [ -d "$GH_DIR" ]; then github_forget; fi ;; # no GitHub now: the installer keeps no login
     DOMAIN) echo "$val" | grep -Eq '^([a-z0-9-]+\.)+[a-z]{2,}$' || die "\"$val\" does not look like a website address." "Ask for an address like www.company.com (no https://, no slash)." ;;
     OWNER_EMAIL) echo "$val" | grep -Eq '^[^@ ]+@[^@ ]+\.[^@ ]+$' || die "\"$val\" does not look like an e-mail." "Ask for the owner's e-mail again." ;;
     COMPANY) [ -n "$val" ] || die "Company name is empty." "Ask for the company name." ;;
@@ -370,7 +376,7 @@ cmd_answer() {
     WEB_SERVER) case "$val" in caddy|existing) ;; *) die "WEB_SERVER must be caddy or existing." "Use existing when nginx or Apache already serves ports 80 and 443 on this server.";; esac ;;
     JOBS) echo "$val" | grep -Eq '^(none|(backup|knowledge|updates)(,(backup|knowledge|updates))*)$' || die "JOBS must be none or a list of backup, knowledge, updates." "Example: answer JOBS backup,knowledge (no night fixes)." ;;
     OWNER_LINK) case "$val" in yes|no) ;; *) die "OWNER_LINK must be yes or no." "Use no when the owner signs in with Google and needs no password link.";; esac ;;
-    GITHUB_REPO) echo "$val" | grep -Eq '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$' || die "\"$val\" is not a repository name." "Use owner/name, for example your-company/website." ;;
+    GITHUB_REPO) echo "$val" | grep -Eq '^([A-Za-z0-9-]+/)?[A-Za-z0-9._-]+$' || die "\"$val\" is not a repository name." "Use owner/name, for example your-company/website (or only the name: the signed-in account is the owner)." ;;
     AI) ai_known "$val" || die "AI must be claude, openai, gemini, grok or other." "Use: answer AI claude (recommended). other = any provider with an API key, or a model on the person's own machine."
         # Another provider: the key and the way of logging in chosen for the earlier one do not carry over.
         load_answers
@@ -380,19 +386,22 @@ cmd_answer() {
     AI_URL) echo "$val" | grep -Eq '^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$' \
               || die "\"$val\" is not an API address." "Use the address only, with http:// or https://, no login, no ? or #. For example http://127.0.0.1:11434 (a model on this machine) or https://api.example.com/v1." ;;
     AI_NAME) echo "$val" | grep -Eq '^[A-Za-z0-9 ._()-]{1,40}$' || die "AI_NAME must be 1-40 letters, digits, spaces or . _ ( ) -." "For example: answer AI_NAME \"Mistral\"." ;;
-    *) die "Unknown answer \"$key\"." "Use one of: TARGET, PUBLISH, DOMAIN, OWNER_EMAIL, COMPANY, AI, AI_LOGIN, AI_URL, AI_NAME, DESIGN, RELEASE, INSTANCE, WEB_SERVER, JOBS, OWNER_LINK, GITHUB_REPO." ;;
+    *) die "Unknown answer \"$key\"." "Use one of: TARGET, GITHUB, PUBLISH, DOMAIN, OWNER_EMAIL, COMPANY, AI, AI_LOGIN, AI_URL, AI_NAME, DESIGN, RELEASE, INSTANCE, WEB_SERVER, JOBS, OWNER_LINK, GITHUB_REPO." ;;
   esac
-  # A new AI choice (or a new way to log in) has to be tested again.
-  case "$key" in AI|AI_LOGIN|AI_URL) rm -f "$DONE_DIR/ai" ;; esac
-  mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"; touch "$ANSWERS"; chmod 600 "$ANSWERS"
-  grep -v "^$key=" "$ANSWERS" > "$ANSWERS.tmp" || true
-  printf '%s=%q\n' "$key" "$val" >> "$ANSWERS.tmp"; chmod 600 "$ANSWERS.tmp"; mv "$ANSWERS.tmp" "$ANSWERS"
+  # A new AI choice (or a new way to log in) has to be tested again. A new GitHub choice or repository: the GitHub step too.
+  case "$key" in AI|AI_LOGIN|AI_URL) rm -f "$DONE_DIR/ai" ;; GITHUB|GITHUB_REPO) rm -f "$DONE_DIR/github_account" ;; esac
+  answers_put "$key" "$val"
   # A new answer after consent changes the plan, so the person has to agree again. PUBLISH is chosen after the first page
   # (and can change later in the chat with Aurelius); publishing itself asks for its own yes. The AI (AI, AI_*) can change
-  # any time too: it changes nothing on the server, only who Aurelius talks to.
+  # any time too: it changes nothing on the server, only who Aurelius talks to. GitHub has its own yes in the chat.
   case "$key" in AI|AI_*) say "Saved $key."; return 0 ;; esac
-  [ "$key" != GITHUB_REPO ] && [ "$key" != PUBLISH ] && [ -f "$CONSENT" ] && rm -f "$CONSENT" && say "The plan changed, so the earlier yes no longer counts. Show the plan again."
+  [ "$key" != GITHUB_REPO ] && [ "$key" != GITHUB ] && [ "$key" != PUBLISH ] && [ -f "$CONSENT" ] && rm -f "$CONSENT" && say "The plan changed, so the earlier yes no longer counts. Show the plan again."
   say "Saved $key."
+}
+answers_put() { # answers_put KEY VALUE: replace or add one answer (no checks; cmd_answer checks first)
+  mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"; touch "$ANSWERS"; chmod 600 "$ANSWERS"
+  grep -v "^$1=" "$ANSWERS" > "$ANSWERS.tmp" || true
+  printf '%s=%q\n' "$1" "$2" >> "$ANSWERS.tmp"; chmod 600 "$ANSWERS.tmp"; mv "$ANSWERS.tmp" "$ANSWERS"
 }
 
 plan_local() {
@@ -407,7 +416,7 @@ Panel:    on this computer, in Docker (the address is shown at the end, like htt
 Website:  only a preview on this computer, until the person chooses where to publish it
 Address:  ${DOMAIN:-not chosen yet (needed only when publishing)}
 Owner:    $OWNER_EMAIL
-Company:  $COMPANY$( [ -n "$AI" ] && printf '\nYour AI:  %s' "$(ai_plan_line)" )
+Company:  $COMPANY$( [ -n "$AI" ] && printf '\nYour AI:  %s' "$(ai_plan_line)" )$(github_plan_line)
 
 What will happen on this computer:
   1. Check that Docker runs. The installer does not install Docker on a computer; the person does it with the guide
@@ -440,7 +449,7 @@ PLAN (nothing has been changed yet)
 Website:  https://$DOMAIN
 Panel:    https://$DOMAIN/admin
 Owner:    $OWNER_EMAIL
-Company:  $COMPANY$( [ -n "$AI" ] && printf '\nYour AI:  %s' "$(ai_plan_line)" )
+Company:  $COMPANY$( [ -n "$AI" ] && printf '\nYour AI:  %s' "$(ai_plan_line)" )$(github_plan_line)
 
 What will happen on this server:
   1. Install Docker (if missing) and create the folder $GILDSITE_HOME.
@@ -453,13 +462,13 @@ $( if [ "$WEB_SERVER" = existing ]; then echo "  4. Keep the web server already 
        backup    = nightly backup of the database and photos at 3:30, kept 7 days
        knowledge = Knowledge wiki refreshed every 15 minutes
        updates   = small fixes install by themselves at night (4:30; off by default for now)
-  7. Create the owner account for $OWNER_EMAIL$( [ "$OWNER_LINK" = yes ] && echo " and give a one-time link to set the password" || echo " (sign-in without a password link, e.g. Google)" ).
+  7. Create the owner account for $OWNER_EMAIL$( [ "$OWNER_LINK" = yes ] && echo " and give a one-time link to set the password" || echo " (sign-in without a password link, e.g. Google)" ).$( [ "$GITHUB" = yes ] && printf "\n%s\n%s" "  8. GitHub: add the GitHub tool (gh) if missing; at the end the panel's feedback goes to GitHub as issues" "     (Gildsite's feedback channel $FEEDBACK_REPO, or the private repository when that one is closed)." )
 
 What will NOT happen:
   - No other programs or websites on this server are changed or stopped.
   - No passwords or keys are shown in the chat; they are stored in files only root can read.
 
-Optional after install (asked separately): connect Aurelius to the AI on this server, connect GitHub.
+Optional after install (asked separately): connect Aurelius to the AI on this server$( [ "$GITHUB" = yes ] || echo ", connect GitHub" ).
 PLAN
 }
 
@@ -776,6 +785,10 @@ cmd_run() {
   run_docker; run_pillow; run_source; run_deps; run_instance; run_production; run_www; run_backup
   mark_done run; progress_set done 8 "installed"; activity ok "Gildsite installed"
   if [ -n "$AI" ]; then ai_share; fi # the panel sees the AI chosen before the install
+  if [ "$GITHUB" = yes ] && ! is_done github; then # the panel's feedback channel, when GitHub was signed in before
+    if is_done github_account; then github_panel || warn "GitHub: the panel's feedback is not connected yet; run ./gildsite-install github again later."
+    else warn "GitHub is not signed in yet: run ./gildsite-install github (the panel's feedback is connected then)."; fi
+  fi
   say ""; say "INSTALLED. Next: ./gildsite-install finish"
 }
 
@@ -796,6 +809,7 @@ cmd_finish() {
   [ "$site" = 200 ] && ok "Website answers (https://$DOMAIN)" || bad "Website: HTTP $site"
   [ "$panel" = 200 ] && ok "Panel answers (https://$DOMAIN/admin)" || bad "Panel: HTTP $panel"
   { [ "$site" = 200 ] && [ "$panel" = 200 ]; } || die "Not everything answers yet." "Wait a minute and run ./gildsite-install finish again; if it stays, check $LOG."
+  github_reminder
   if [ "$OWNER_LINK" = no ]; then
     mark_done finish
     say ""; say "DONE. The owner signs in at https://$pd/admin with $OWNER_EMAIL (no password link was made, as chosen)."
@@ -811,6 +825,12 @@ cmd_finish() {
   say "  https://$pd/admin/reset/$token"
   say "After that they log in at https://$pd/admin and the panel guides them (Setup)."
   say "New versions: the panel shows a dot in the menu and the owner clicks Update now$(job_on updates && echo "; small fixes install by themselves at night")."
+}
+
+# Skipped or unfinished GitHub: one reminder with the reason (only when the person answered GITHUB).
+github_reminder() {
+  { [ "$GITHUB" = skip ] || { [ "$GITHUB" = yes ] && ! is_done github_account; }; } || return 0
+  warn "Reminder: GitHub is not connected. Strongly recommended: $(github_why) Any time: answer GITHUB yes, then ./gildsite-install github."
 }
 
 # ---------- connections (steps "aurelius" and "github") ----------
@@ -893,42 +913,141 @@ cmd_aurelius() {
 
 gh_() { env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="$GH_DIR" gh "$@"; }
 
+# GitHub as early as possible (answer GITHUB yes|skip, asked right after "where?"). Why: GitHub keeps a copy of every
+# version of the website, carries feedback and updates, and lets the website move to another place with one click.
+# Strongly recommended on a server and a computer, needed for publishing on Cloudflare. Signing in is GitHub's own
+# device login in the browser: no password or token goes through the chat. With GITHUB yes, `github` may run before
+# the yes to the plan: it only signs in and makes the person's private repository on GitHub (nothing on the server
+# changes; on a server without gh the tool comes after the yes). The panel's feedback channel is connected at the end
+# of `run`. Without a GITHUB answer (or with skip) `github` works exactly as before: after the install, needs consent.
+FEEDBACK_REPO="${GILDSITE_FEEDBACK_REPO:-marcink-ui/gildsite-feedback}"
+github_why() { echo "GitHub keeps a copy of every version of the website, carries feedback and updates, and lets the website move to another place with one click."; }
+slug() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | tr -s '-' | sed 's/^-//; s/-$//' | cut -c1-40; }
+repo_default() { # the private repository's name when the person did not choose one
+  local n=""; if [ -n "$DOMAIN" ]; then n=$(instance_name); elif [ -n "$COMPANY" ]; then n=$(slug "$COMPANY"); fi
+  echo "${n:-gildsite}-website"
+}
+repo_full() { local r="${GITHUB_REPO:-$(repo_default)}"; case "$r" in */*) echo "$r" ;; *) echo "$1/$r" ;; esac; } # repo_full LOGIN
+github_plan_line() {
+  case "$GITHUB" in
+    yes) printf '\nGitHub:   private repository %s (a copy of every version), feedback to %s' \
+           "$( case "${GITHUB_REPO:-}" in */*) echo "$GITHUB_REPO" ;; *) echo "<account>/${GITHUB_REPO:-$(repo_default)}" ;; esac )" "$FEEDBACK_REPO" ;;
+    skip) printf '\nGitHub:   skipped for now (strongly recommended; connect any time: answer GITHUB yes, then github)' ;;
+  esac
+}
+gh_install_hint() { case "$(computer_kind)" in mac) echo "brew install gh (or the installer from https://cli.github.com)" ;; *) echo "sudo apt install gh (or see https://cli.github.com)" ;; esac; }
+
+# GitHub's device login: the person opens a GitHub page and types a short code. No token goes through the chat.
+# Returns 4 (GITHUB=WAITING) until the person confirmed. "early" adds the hint for a person without an account.
+gh_login() {
+  mkdir -p "$GH_DIR"; chmod 700 "$GH_DIR"
+  gh_ auth status -h github.com >/dev/null 2>&1 && return 0
+  if [ -f "$GH_PID" ] && kill -0 "$(cat "$GH_PID")" 2>/dev/null; then
+    say "Still waiting for the person to confirm on GitHub."
+  else
+    : > "$GH_OUT"; chmod 600 "$GH_OUT"
+    # --skip-ssh-key only where gh knows it (gh 2.23 from Debian 12 stops on it; with https no SSH key is asked anyway).
+    local skip=(); gh auth login --help 2>&1 | grep -q -- --skip-ssh-key && skip=(--skip-ssh-key)
+    ( env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="$GH_DIR" nohup gh auth login -h github.com -p https --web ${skip[@]+"${skip[@]}"} -s repo </dev/null >"$GH_OUT" 2>&1 & echo $! > "$GH_PID" )
+    local i; for i in $(seq 1 20); do grep -q 'one-time code' "$GH_OUT" && break; sleep 1; done
+  fi
+  local codeline; codeline=$({ grep -o 'one-time code: [A-Z0-9-]*' "$GH_OUT" || true; } | tail -1 | sed 's/one-time code: //')
+  [ -n "$codeline" ] || die "GitHub did not give a login code: $(grep -m1 . "$GH_OUT" || true)." "Check the internet connection and run ./gildsite-install github again."
+  say "GITHUB=WAITING"
+  [ "${1:-}" != early ] || say "No GitHub account yet? The person makes one first at https://github.com/signup (free; they choose the name and password themselves, never in the chat)."
+  say "Ask the person to open https://github.com/login/device, sign in, type the code $codeline and allow access."
+  say "Then run ./gildsite-install github again."
+  return 4
+}
+
+# The panel's feedback goes to REPO as issues. The token goes to the panel through a file (600) that is removed right
+# after; the panel keeps its own encrypted copy. "soft": warn and return 1 instead of stopping.
+github_feedback() {
+  local repo="$1" soft="${2:-}" dir uid tok out why
+  step "GitHub: connect the panel to $repo"
+  dir=$(inst_dir); uid=$(inst_uid); tok="$dir/dane/home/.gildsite-gh-token"
+  trap 'rm -f "'"$tok"'"' RETURN EXIT
+  if ! ( umask 077; gh_ auth token > "$tok" ); then
+    rm -f "$tok"; [ -n "$soft" ] && { warn "Reading the GitHub login failed."; return 1; }
+    die "Reading the GitHub login failed." "Run ./gildsite-install github again."
+  fi
+  chown "$uid:$uid" "$tok" 2>/dev/null || true
+  out=$(connections -e GITHUB_TOKEN_PLIK=/app/.home/.gildsite-gh-token -e REPO="$repo") || true
+  rm -f "$tok"
+  case "$out" in *GITHUB=polaczono*) return 0 ;; esac
+  why=$(echo "$out" | sed -n 's/^GITHUB=blad //p' | head -1)
+  [ -n "$soft" ] && { warn "GitHub refused $repo: ${why:-no answer}"; return 1; }
+  die "GitHub refused: $why" "Check the repository name and that this GitHub account can open issues there, then run ./gildsite-install github again."
+}
+# The panel does not keep a second copy in the installer: sign out and remove the installer's GitHub folder.
+github_forget() { gh_ auth logout -h github.com >/dev/null 2>&1 || true; rm -rf "$GH_DIR" "$GH_OUT" "$GH_PID"; }
+
+# With GITHUB yes: feedback goes to Gildsite's feedback channel; when that one is closed to this account, to the
+# person's own private repository, so nothing is lost. Never stops the caller (run): returns 1 and says why.
+github_panel() {
+  [ -f "$(inst_dir)/app/tools/serwer-polaczenia.ts" ] || { warn "This Gildsite release cannot connect GitHub from the server yet: connect it in the panel (Settings)."; return 1; }
+  local to="$FEEDBACK_REPO"
+  if ! github_feedback "$to" soft; then
+    to="$GITHUB_REPO"; github_feedback "$to" soft || return 1
+    warn "Feedback goes to the private repository $to for now: $FEEDBACK_REPO is not open to this GitHub account."
+  fi
+  github_forget; mark_done github
+  ok "Panel connected to GitHub: feedback goes to $to as issues"
+}
+
+github_early() {
+  if ! have gh; then
+    if [ "$TARGET" = local ]; then
+      say "GITHUB=WAITING"
+      say "The GitHub tool (gh) is not on this computer. Ask the person to install it in their own terminal: $(gh_install_hint)"
+      say "Then run ./gildsite-install github again."
+      return 4
+    elif [ -f "$CONSENT" ]; then
+      step "GitHub: install the GitHub tool (gh)"; sudo_ apt-get install -y gh >> "$LOG" 2>&1 || die "Installing gh failed." "Check $LOG."
+    else
+      say "GITHUB=WAITING"
+      say "The GitHub tool (gh) is not on this server yet. The installer adds it after the person's yes to the plan"
+      say "(nothing changes on the server before that). After consent yes, run ./gildsite-install github again, before run."
+      return 4
+    fi
+  fi
+  say "GitHub: $(github_why)"
+  gh_login early || return $?
+  local login full vis
+  login=$(gh_ api user -q .login 2>/dev/null || true)
+  [ -n "$login" ] || die "GitHub did not say which account is signed in." "Run ./gildsite-install github again in a minute."
+  ok "Signed in to GitHub as $login"
+  full=$(repo_full "$login")
+  vis=$(gh_ repo view "$full" --json visibility -q .visibility 2>/dev/null || true)
+  case "$vis" in
+    PRIVATE|INTERNAL) ok "Private repository already there: $full" ;;
+    PUBLIC) die "The repository $full already exists and is public; the website's copy must stay private." "Ask the person for another name and save it: ./gildsite-install answer GITHUB_REPO <name>, then run ./gildsite-install github again." ;;
+    *) gh_ repo create "$full" --private --add-readme --description "Website and panel (Gildsite)" >> "$LOG" 2>&1 \
+         || die "Creating the private repository $full failed." "Check that the name is free and this account may create it there (answer GITHUB_REPO <name>), then run ./gildsite-install github again."
+       ok "Private repository created: $full" ;;
+  esac
+  answers_put GITHUB_REPO "$full"; GITHUB_REPO="$full"; mark_done github_account
+  say ""; say "GITHUB=READY. Account $login, private repository $full."
+  if [ "$TARGET" != local ] && is_done run; then
+    is_done github || github_panel || die "The panel's feedback could not be connected to GitHub." "Check $LOG, then run ./gildsite-install github again (or connect it in the panel: Settings)."
+  else
+    say "The panel's feedback goes to GitHub ($FEEDBACK_REPO) at the end of the install, by itself."
+  fi
+}
+
 cmd_github() {
-  need_consent; load_answers; ACTIVITY_ON=1
+  load_answers
+  if [ "$GITHUB" = yes ]; then github_early; return; fi
+  need_consent; ACTIVITY_ON=1
   is_done run || die "Gildsite is not installed yet." "Run ./gildsite-install run first."
   need_tool
   [ -n "${GITHUB_REPO:-}" ] || die "No repository chosen yet." "Ask the person which GitHub repository should get feedback (owner/name), then ./gildsite-install answer GITHUB_REPO owner/name."
   if ! have gh; then step "GitHub: install the GitHub tool (gh)"; sudo_ apt-get install -y gh >> "$LOG" 2>&1 || die "Installing gh failed." "Check $LOG."; fi
-  mkdir -p "$GH_DIR"; chmod 700 "$GH_DIR"
-  if ! gh_ auth status -h github.com >/dev/null 2>&1; then
-    # Device login: the person opens a GitHub page and types a short code. No token goes through the chat.
-    if [ -f "$GH_PID" ] && kill -0 "$(cat "$GH_PID")" 2>/dev/null; then
-      say "Still waiting for the person to confirm on GitHub."
-    else
-      : > "$GH_OUT"; chmod 600 "$GH_OUT"
-      ( env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="$GH_DIR" nohup gh auth login -h github.com -p https --web --skip-ssh-key -s repo </dev/null >"$GH_OUT" 2>&1 & echo $! > "$GH_PID" )
-      local i; for i in $(seq 1 20); do grep -q 'one-time code' "$GH_OUT" && break; sleep 1; done
-    fi
-    local codeline; codeline=$({ grep -o 'one-time code: [A-Z0-9-]*' "$GH_OUT" || true; } | tail -1 | sed 's/one-time code: //')
-    [ -n "$codeline" ] || die "GitHub did not give a login code: $(tail -1 "$GH_OUT")." "Check the internet connection and run ./gildsite-install github again."
-    say "GITHUB=WAITING"
-    say "Ask the person to open https://github.com/login/device, sign in, type the code $codeline and allow access."
-    say "Then run ./gildsite-install github again."
-    return 4
-  fi
-  step "GitHub: connect the panel to $GITHUB_REPO"
-  local dir uid tok out; dir=$(inst_dir); uid=$(inst_uid); tok="$dir/dane/home/.gildsite-gh-token"
-  trap 'rm -f "'"$tok"'"' RETURN EXIT
-  ( umask 077; gh_ auth token > "$tok" ) || die "Reading the GitHub login failed." "Run ./gildsite-install github again."
-  chown "$uid:$uid" "$tok" 2>/dev/null || true
-  out=$(connections -e GITHUB_TOKEN_PLIK=/app/.home/.gildsite-gh-token -e REPO="$GITHUB_REPO") || true
-  rm -f "$tok"
-  case "$out" in
-    *GITHUB=polaczono*) ;;
-    *) die "GitHub refused: $(echo "$out" | sed -n 's/^GITHUB=blad //p' | head -1)" "Check the repository name and that this GitHub account can open issues there, then run ./gildsite-install github again." ;;
-  esac
+  gh_login || return $?
+  case "$GITHUB_REPO" in */*) ;; *) GITHUB_REPO=$(repo_full "$(gh_ api user -q .login 2>/dev/null || true)") ;; esac
+  github_feedback "$GITHUB_REPO"
   # The panel now keeps its own encrypted copy; the installer does not keep a second one.
-  gh_ auth logout -h github.com >/dev/null 2>&1 || true; rm -rf "$GH_DIR" "$GH_OUT" "$GH_PID"
+  github_forget
   mark_done github
   ok "Panel connected to GitHub: $GITHUB_REPO (feedback goes there as issues)"
   say ""; say "GITHUB CONNECTED. Next: ./gildsite-install finish"
@@ -950,6 +1069,7 @@ progress_data() { # fills the P_* and C_* variables the three formats print
   load_answers; P_STATE=idle; P_STEP=0; P_MSG=""; P_AT=0; [ -f "$PROGRESS" ] && . "$PROGRESS"
   C_ITEMS=(); local n=0 s
   add() { C_ITEMS+=("$1|$2|$3"); }
+  if [ "$GITHUB" = yes ]; then s=todo; if is_done github_account; then s="done"; fi; add "GitHub (account, private repository)" "$s" ""; fi
   { [ -n "$DOMAIN" ] || [ "$TARGET" = local ]; } && [ -n "$OWNER_EMAIL" ] && [ -n "$COMPANY" ] && s=done || s=todo; add "Your answers" "$s" "Address, owner e-mail, company"
   if [ -n "$AI" ]; then s=todo; if is_done ai; then s="done"; fi; add "Your AI ($(ai_name))" "$s" ""; fi
   [ -f "$CONSENT" ] && s=done || s=todo; add "Your yes to the plan" "$s" ""
@@ -983,6 +1103,8 @@ progress_data() { # fills the P_* and C_* variables the three formats print
   elif is_done run; then [ "$WEB_SERVER" = existing ] && C_HTTPS="set up by the server admin" || C_HTTPS="on (Caddy)"; else C_HTTPS="not yet"; fi
   C_LAST=(); [ -f "$ACTIVITY" ] && { local l; while IFS= read -r l; do C_LAST+=("$l"); done < <(tail -3 "$ACTIVITY"); } # no mapfile: a Mac has bash 3.2
   if [ "$P_STATE" = failed ]; then C_MOVE="Something stopped: ${P_MSG}. I will explain what to do."
+  elif [ "$GITHUB" = yes ] && ! is_done github_account && [ "$P_STATE" != running ] && { have gh || [ "$TARGET" = local ] || [ -f "$CONSENT" ]; }; then
+    C_MOVE="Sign in to GitHub in the browser (the chat guides you; never a password in the chat)."
   elif { [ -z "$DOMAIN" ] && [ "$TARGET" != local ]; } || [ -z "$OWNER_EMAIL" ] || [ -z "$COMPANY" ]; then C_MOVE="Answer three short questions in the chat."
   elif [ -n "$AI" ] && ! is_done ai; then C_MOVE="Log in to your AI, $(ai_name) (the chat guides you; a key only in the secure field)."
   elif [ ! -f "$CONSENT" ]; then C_MOVE="Read the plan and say yes or no."
@@ -1065,7 +1187,11 @@ cmd_status() {
       check)   ( cmd_check >/dev/null 2>&1 ) && mark="[x]" ;;
       answers) { [ -n "$DOMAIN" ] || [ "$TARGET" = local ]; } && [ -n "$OWNER_EMAIL" ] && [ -n "$COMPANY" ] && mark="[x]" ;;
       ai)      [ -n "$AI" ] || continue; desc="$desc, now: $(ai_name)"; is_done ai && mark="[x]" ;;
+      github_account) [ -n "$GITHUB" ] || continue
+               if [ "$GITHUB" = skip ]; then mark="[-]"; desc="$desc: skipped (any time: answer GITHUB yes, then github)"
+               elif is_done github_account; then mark="[x]"; desc="$desc: $GITHUB_REPO"; fi ;;
       consent) [ -f "$CONSENT" ] && mark="[x]" ;;
+      github)  [ "$GITHUB" != yes ] || desc="GitHub: the panel's feedback goes there (connected by itself at the end of the install)"; is_done github && mark="[x]" ;;
       dns)     if [ "$TARGET" = local ]; then mark="[-]"; desc="$desc (not needed on a computer)"; elif is_done dns; then mark="[x]"; fi ;;
       *)       is_done "$name" && mark="[x]" ;;
     esac
@@ -1081,7 +1207,7 @@ Gildsite installer $VERSION. Read INSTALL-FOR-AI.md first.
   docker-help           step-by-step Docker guide for this computer (read-only)
   ai                    your AI: login check and connection test (answer AI claude|openai|gemini|grok|other first)
   ai-key                the PERSON types the AI API key here, in their own terminal (hidden; never in the chat)
-  answer KEY VALUE      save TARGET server|local, DOMAIN, OWNER_EMAIL, COMPANY, AI (also AI_LOGIN window|key,
+  answer KEY VALUE      save TARGET server|local, GITHUB yes|skip, DOMAIN, OWNER_EMAIL, COMPANY, AI (also AI_LOGIN window|key,
                         AI_URL and AI_NAME for another AI, PUBLISH server|cloudflare,
                         DESIGN on|off, RELEASE, INSTANCE, WEB_SERVER, JOBS backup,knowledge,updates|none,
                         OWNER_LINK yes|no, GITHUB_REPO)
@@ -1091,7 +1217,9 @@ Gildsite installer $VERSION. Read INSTALL-FOR-AI.md first.
   key                   save the download key from input (needs consent; never print it)
   run                   install and start everything (needs consent)
   aurelius [claude|codex|none]  connect Aurelius to the AI on this server (needs consent)
-  github                connect GitHub (needs consent and answer GITHUB_REPO; run again after the person confirms)
+  github                GitHub. With answer GITHUB yes (also before consent): sign in and make the private repository;
+                        the panel's feedback is connected after the install. Without it: connect the panel to
+                        GITHUB_REPO (needs consent). Run again after the person confirms on GitHub.
   finish                final check and owner login link (needs consent)
   status                which steps are done
   progress [--html|--json]  progress card for the chat (text, HTML widget or data)

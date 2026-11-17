@@ -9,7 +9,7 @@ Install Gildsite (website, panel, Design and the Aurelius AI assistant) on your 
 
    > Install Gildsite on this server using https://github.com/marcink-ui/gildsite-install. Follow INSTALL-FOR-AI.md and guide me.
 
-3. Answer its questions (including which AI Aurelius should use) and say yes to the plan.
+3. Answer its questions (GitHub first, then which AI Aurelius should use) and say yes to the plan.
 4. Add the DNS record it shows you at your domain provider.
 5. Open the login link it gives you at the end.
 
@@ -24,7 +24,9 @@ About 10 minutes of your time. The installation itself takes 15–25 minutes.
   until you choose where to publish it (a server or Cloudflare).
 - An AI for Aurelius: Claude (recommended), OpenAI, Gemini, Grok, or another provider or a model on your own machine.
   You log in with the provider's own window, or type an API key into the installer's secure field yourself.
-- Optional: a GitHub account, if you want feedback and code changes to go there.
+- A GitHub account (free; the AI helps you make one). Strongly recommended: it keeps a copy of every version of your
+  website, carries feedback and updates, and lets you move the website with one click. Needed for publishing on
+  Cloudflare. You sign in on GitHub's own page, never with a password in the chat.
 
 ## Safety
 
@@ -33,4 +35,4 @@ About 10 minutes of your time. The installation itself takes 15–25 minutes.
   the installer's secure field, never into the chat.
 - Other programs on the server are not touched.
 
-Status: version 0.10.0 (changes: CHANGELOG.md). New step "Your AI": choose Claude (recommended), OpenAI, Gemini, Grok or another AI, log in, and the installer tests the connection. The first question is now where Gildsite runs: a server (as before) or your own computer. On a computer the installer checks it and Docker; installing Gildsite there comes with the next version. On a server: installing the website and panel works, installs the newest release, turns on updates from the panel, with a live progress card for the chat (tested on a clean machine and on a server that already runs nginx). Connecting Aurelius (Claude Code, Codex) works and needs Gildsite 9cbf11d or newer. Connecting GitHub uses a device login and still has to be tried on a real server.
+Status: version 0.11.0 (changes: CHANGELOG.md). GitHub now comes right after the first question: the installer helps make an account, signs in on GitHub's page, makes your private repository and connects the panel's feedback at the end of the install. Since 0.10.0: step "Your AI": choose Claude (recommended), OpenAI, Gemini, Grok or another AI, log in, and the installer tests the connection. The first question is now where Gildsite runs: a server (as before) or your own computer. On a computer the installer checks it and Docker; installing Gildsite there comes with the next version. On a server: installing the website and panel works, installs the newest release, turns on updates from the panel, with a live progress card for the chat (tested on a clean machine and on a server that already runs nginx). Connecting Aurelius (Claude Code, Codex) works and needs Gildsite 9cbf11d or newer. Connecting GitHub uses a device login and still has to be tried on a real server.
