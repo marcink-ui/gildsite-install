@@ -8,13 +8,33 @@ umask 077
 [ -n "${HOME:-}" ] || HOME=$(getent passwd "$(id -u)" | cut -d: -f6); export HOME="${HOME:-/root}"
 case ":$PATH:" in *:/bin:*) ;; *) PATH="$PATH:/bin";; esac; export PATH
 
-VERSION="0.7.2"
+VERSION="0.9.0"
 INSTALLER_DIR="$(cd "$(dirname "$0")" && pwd)"
-GILDSITE_HOME="${GILDSITE_HOME:-/srv/gildsite}"
-STATE_DIR="${GILDSITE_STATE_DIR:-$GILDSITE_HOME/.install}"
-ANSWERS="$STATE_DIR/answers.env"
-CONSENT="$STATE_DIR/consent"
-DONE_DIR="$STATE_DIR/done"
+
+# What kind of machine this is: mac, wsl (Windows with WSL), linux, windows (Windows without WSL) or other.
+computer_kind() {
+  case "$(uname -s)" in
+    Darwin) echo mac ;;
+    Linux) if grep -qi microsoft /proc/version 2>/dev/null; then echo wsl; else echo linux; fi ;;
+    MINGW*|MSYS*|CYGWIN*) echo windows ;;
+    *) echo other ;;
+  esac
+}
+# Where the installer keeps its files. A server: /srv/gildsite, as always (an existing installation is found there first).
+# A person's own computer (TARGET local): ~/gildsite, because a Mac or a normal account cannot write to /srv.
+HOME_AUTO=""
+if [ -z "${GILDSITE_HOME:-}" ]; then
+  HOME_AUTO=1
+  if [ -d /srv/gildsite/.install ]; then GILDSITE_HOME=/srv/gildsite
+  elif [ -d "$HOME/gildsite/.install" ]; then GILDSITE_HOME="$HOME/gildsite"
+  else case "$(computer_kind)" in mac|windows) GILDSITE_HOME="$HOME/gildsite" ;; *) GILDSITE_HOME=/srv/gildsite ;; esac; fi
+fi
+[ -z "${GILDSITE_STATE_DIR:-}" ] || HOME_AUTO=""
+set_home() {
+  GILDSITE_HOME="$1"; STATE_DIR="${GILDSITE_STATE_DIR:-$GILDSITE_HOME/.install}"
+  ANSWERS="$STATE_DIR/answers.env"; CONSENT="$STATE_DIR/consent"; DONE_DIR="$STATE_DIR/done"
+}
+set_home "$GILDSITE_HOME"
 
 # Until ready-made Docker images exist, the panel is built on the server; that build needs about 8 GB of memory.
 MIN_RAM_GB="${MIN_RAM_GB:-8}"
@@ -40,7 +60,8 @@ die()   { printf 'ERROR: %s\nFIX: %s\n' "$1" "${2:-Run ./gildsite-install status
           [ -n "${ACTIVITY_ON:-}" ] && { activity error "$1"; progress_set failed "${RUN_STEP:-0}" "$1"; }; exit "${3:-1}"; }
 have()  { command -v "$1" >/dev/null 2>&1; }
 
-load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; DESIGN="${DESIGN:-off}"; RELEASE="${RELEASE:-latest}"; INSTANCE="${INSTANCE:-}"; GITHUB_REPO="${GITHUB_REPO:-}"; WEB_SERVER="${WEB_SERVER:-caddy}"; JOBS="${JOBS:-backup,knowledge}"; OWNER_LINK="${OWNER_LINK:-yes}"; [ "${GILDSITE_WWW:-}" = none ] && WEB_SERVER=existing; true; }
+default_target() { case "$(computer_kind)" in mac|windows) echo local ;; *) echo server ;; esac; }
+load_answers() { [ -f "$ANSWERS" ] && . "$ANSWERS"; TARGET="${TARGET:-$(default_target)}"; PUBLISH="${PUBLISH:-}"; DOMAIN="${DOMAIN:-}"; OWNER_EMAIL="${OWNER_EMAIL:-}"; COMPANY="${COMPANY:-}"; DESIGN="${DESIGN:-off}"; RELEASE="${RELEASE:-latest}"; INSTANCE="${INSTANCE:-}"; GITHUB_REPO="${GITHUB_REPO:-}"; WEB_SERVER="${WEB_SERVER:-caddy}"; JOBS="${JOBS:-backup,knowledge}"; OWNER_LINK="${OWNER_LINK:-yes}"; [ "${GILDSITE_WWW:-}" = none ] && WEB_SERVER=existing; true; }
 need_consent() { [ -f "$CONSENT" ] || die "The person has not agreed to the plan yet." "Run ./gildsite-install plan, explain it, and after a clear yes run ./gildsite-install consent yes." 2; }
 mark_done() { mkdir -p "$DONE_DIR"; date -u +%FT%TZ > "$DONE_DIR/$1"; }
 is_done() { [ -f "$DONE_DIR/$1" ]; }
@@ -53,6 +74,8 @@ resolve() { { getent ahostsv4 "$1" 2>/dev/null || true; } | awk 'NR==1 {print $1
 
 # ---------- commands ----------
 cmd_check() {
+  load_answers
+  [ "$TARGET" = local ] && { check_local "${1:-}"; return; }
   local fails=0 json="${1:-}"
   local os="unknown" arch ram disk
   [ -f /etc/os-release ] && os=$(. /etc/os-release; echo "$ID $VERSION_ID")
@@ -83,9 +106,117 @@ cmd_check() {
   if [ "$fails" -eq 0 ]; then say "READY: the server can run Gildsite."; else say "NOT READY: $fails problem(s) above."; return 1; fi
 }
 
+# ---------- the person's own computer (TARGET local) ----------
+# Mac, Windows with WSL or Linux. Docker is never installed by the script on a computer: the person installs Docker
+# Desktop (or Docker on Linux) with the step-by-step guide from `docker-help`. Everything listens on 127.0.0.1 only.
+# shellcheck disable=SC1091 # /etc/os-release exists only on Linux
+computer_name() { case "$(computer_kind)" in mac) echo "Mac (macOS $(sw_vers -productVersion 2>/dev/null || echo '?'))" ;; wsl) echo "Windows with WSL ($(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-Linux}"))" ;; linux) echo "Linux ($(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unknown}"))" ;; windows) echo "Windows without WSL" ;; *) uname -s ;; esac; }
+free_ram_gb() { # memory free for new programs now, in whole GB (rounded down)
+  if [ -r /proc/meminfo ]; then awk '/MemAvailable/ {printf "%d", $2/1024/1024}' /proc/meminfo
+  elif have vm_stat; then vm_stat | awk -v ps="$(sysctl -n hw.pagesize 2>/dev/null || echo 4096)" \
+      '/Pages (free|inactive|speculative)/ {gsub(/\./,"",$NF); p+=$NF} END {printf "%d", p*ps/1024/1024/1024}'
+  else echo 0; fi
+}
+free_disk_gb() { local p="$GILDSITE_HOME"; while [ ! -d "$p" ]; do p=$(dirname "$p"); done; df -Pk "$p" | awk 'NR==2 {printf "%d", $4/1024/1024}'; }
+# Docker: "running", "no-access" (installed, but this account may not use it), "stopped" or "missing".
+docker_state() {
+  have docker || { echo missing; return; }
+  local e; e=$(docker info 2>&1 >/dev/null) && { echo running; return; }
+  case "$e" in *ermission*) echo no-access ;; *) echo stopped ;; esac
+}
+docker_mem_gb() { docker info --format '{{.MemTotal}}' 2>/dev/null | awk '{printf "%d", $1/1024/1024/1024 + 0.5}'; }
+
+check_local() {
+  local fails=0 json="${1:-}" kind arch ram disk dk dmem="" ais=() a
+  kind=$(computer_kind); arch=$(uname -m); ram=$(free_ram_gb); disk=$(free_disk_gb); dk=$(docker_state)
+  [ "$dk" = running ] && dmem=$(docker_mem_gb)
+  for a in claude codex gemini opencode; do have "$a" && ais+=("$a"); done
+  if [ "$json" = "--json" ]; then
+    printf '{"target":"local","computer":"%s","arch":"%s","ram_free_gb":%s,"disk_free_gb":%s,"docker":"%s","docker_memory_gb":%s,"ai_clients":"%s"}\n' \
+      "$kind" "$arch" "${ram:-0}" "${disk:-0}" "$dk" "${dmem:-0}" "${ais[*]:-}"
+    return 0
+  fi
+  say "Gildsite installer $VERSION: computer check (nothing is changed)"
+  case "$kind" in
+    mac|wsl|linux) ok "Computer: $(computer_name)" ;;
+    windows) bad "Computer: Windows without WSL. Gildsite runs in WSL (Ubuntu inside Windows); ./gildsite-install docker-help shows how to get it"; fails=$((fails+1)) ;;
+    *) bad "Computer: $(uname -s) is not supported (Mac, Windows with WSL or Linux)"; fails=$((fails+1)) ;;
+  esac
+  case "$arch" in x86_64|aarch64|arm64) ok "Processor: $arch" ;; *) bad "Processor: $arch is not supported"; fails=$((fails+1)) ;; esac
+  if [ "${ram:-0}" -ge "$MIN_RAM_GB" ]; then ok "Free memory: ${ram} GB"
+  else bad "Free memory: ${ram:-0} GB, needs ${MIN_RAM_GB} GB free (close big programs, or see ./gildsite-install docker-help)"; fails=$((fails+1)); fi
+  if [ "${disk:-0}" -ge "$MIN_DISK_GB" ]; then ok "Free disk: ${disk} GB"; else bad "Free disk: ${disk:-0} GB, needs at least ${MIN_DISK_GB} GB"; fails=$((fails+1)); fi
+  case "$dk" in
+    running) ok "Docker: running ($(docker --version 2>/dev/null | cut -d, -f1))"
+             if [ -n "$dmem" ] && [ "$dmem" -lt "$MIN_RAM_GB" ]; then bad "Docker may use only ${dmem} GB of memory, needs ${MIN_RAM_GB} GB (Docker Desktop: Settings, Resources, Memory)"; fails=$((fails+1)); fi ;;
+    no-access) bad "Docker: installed, but this account may not use it (./gildsite-install docker-help, part \"no access\")"; fails=$((fails+1)) ;;
+    stopped) bad "Docker: installed but not running. Start Docker Desktop (or Docker) and check again"; fails=$((fails+1)) ;;
+    *) bad "Docker: not installed. The installer does not install it on a computer; guide the person with ./gildsite-install docker-help"; fails=$((fails+1)) ;;
+  esac
+  if [ ${#ais[@]} -gt 0 ]; then ok "AI on this computer: ${ais[*]} (Aurelius can connect to it)"; else warn "AI on this computer: none found (Aurelius can still use an API key in the panel)"; fi
+  say ""
+  if [ "$fails" -eq 0 ]; then say "READY: this computer can run Gildsite."; else say "NOT READY: $fails problem(s) above."; return 1; fi
+}
+
+cmd_docker_help() { # read-only: step-by-step Docker guide for this computer, for the AI to retell one step at a time
+  load_answers
+  local kind; kind=$(computer_kind)
+  say "Docker on this computer: $(computer_name). Nothing is changed by this command."
+  say "Tell the person one step at a time and wait for \"done\" after each. Then run ./gildsite-install check again."
+  say ""
+  case "$kind" in
+    mac) cat <<'HELP'
+1. Open https://www.docker.com/products/docker-desktop/ and download Docker Desktop for Mac.
+   Pick "Apple Silicon" when the processor is arm64, "Intel" when it is x86_64 (./gildsite-install check shows it).
+2. Open the downloaded file and drag Docker to Applications.
+3. Start Docker from Applications, accept the terms. Signing in is not needed ("Skip" or "Continue without signing in").
+4. Wait until the whale icon at the top of the screen says "Docker Desktop is running".
+5. Docker settings (gear icon), Resources, Memory: at least 8 GB. Click "Apply & restart".
+HELP
+    ;;
+    wsl) cat <<'HELP'
+1. In Windows (not in this window) open https://www.docker.com/products/docker-desktop/ and download Docker Desktop for Windows.
+2. Install it with the "Use WSL 2" option on. Restart Windows if it asks.
+3. Start Docker Desktop, accept the terms. Signing in is not needed.
+4. Docker Desktop settings, Resources, WSL integration: turn it on for this Linux (for example Ubuntu). Click "Apply & restart".
+5. Close this window and open it again, so it sees Docker.
+Too little free memory: WSL gets only part of the computer's memory. In Windows, the file .wslconfig in the user folder
+(C:\Users\<name>\.wslconfig) with the two lines
+   [wsl2]
+   memory=10GB
+then in PowerShell: wsl --shutdown, and open this window again.
+HELP
+    ;;
+    windows) cat <<'HELP'
+Gildsite runs in WSL (a small Linux inside Windows), not directly in Windows.
+1. Open PowerShell as administrator (Start, type PowerShell, right click, Run as administrator).
+2. Type: wsl --install   and press Enter. Restart Windows when it is done.
+3. Open "Ubuntu" from the Start menu, choose a user name and password (this is the Linux account, not a website password).
+4. Start the AI in that Ubuntu window and the installation from there: the guide then continues with Docker Desktop.
+HELP
+    ;;
+    *) cat <<'HELP'
+Docker Engine on Linux. The person types these in their own terminal (it asks for their computer password):
+1. curl -fsSL https://get.docker.com | sudo sh
+2. sudo usermod -aG docker "$USER"
+3. Log out and log in again (or restart the computer), so the account may use Docker.
+Instead of the above, Docker Desktop for Linux works too: https://docs.docker.com/desktop/setup/install/linux/
+HELP
+    ;;
+  esac
+  say ""
+  say "No access: when check says this account may not use Docker, step 2 and 3 of the Linux guide fix it (on a Mac: restart Docker Desktop)."
+}
+
 cmd_answer() {
   local key="${1:-}" val="${2:-}"
   case "$key" in
+    TARGET) case "$val" in server|local) ;; *) die "TARGET must be server or local." "Use server for a server on the internet (as before), local for the person's own computer.";; esac
+            if [ "$val" = server ]; then case "$(computer_kind)" in mac|windows) die "This is a personal computer ($(computer_name)), not a server." "Use: answer TARGET local. A server needs Linux (Ubuntu or Debian).";; esac; fi
+            # First answer on a computer: keep the installer's files in ~/gildsite instead of /srv/gildsite.
+            if [ "$val" = local ] && [ -n "$HOME_AUTO" ] && [ ! -f "$ANSWERS" ] && [ "$GILDSITE_HOME" = /srv/gildsite ]; then set_home "$HOME/gildsite"; fi ;;
+    PUBLISH) case "$val" in server|cloudflare) ;; *) die "PUBLISH must be server or cloudflare." "Use: answer PUBLISH cloudflare (or server).";; esac
+             load_answers; [ "$TARGET" = local ] || die "PUBLISH is only for an installation on a computer." "On a server the website is already public at its address; nothing to choose." ;;
     DOMAIN) echo "$val" | grep -Eq '^([a-z0-9-]+\.)+[a-z]{2,}$' || die "\"$val\" does not look like a website address." "Ask for an address like www.company.com (no https://, no slash)." ;;
     OWNER_EMAIL) echo "$val" | grep -Eq '^[^@ ]+@[^@ ]+\.[^@ ]+$' || die "\"$val\" does not look like an e-mail." "Ask for the owner's e-mail again." ;;
     COMPANY) [ -n "$val" ] || die "Company name is empty." "Ask for the company name." ;;
@@ -96,18 +227,53 @@ cmd_answer() {
     JOBS) echo "$val" | grep -Eq '^(none|(backup|knowledge|updates)(,(backup|knowledge|updates))*)$' || die "JOBS must be none or a list of backup, knowledge, updates." "Example: answer JOBS backup,knowledge (no night fixes)." ;;
     OWNER_LINK) case "$val" in yes|no) ;; *) die "OWNER_LINK must be yes or no." "Use no when the owner signs in with Google and needs no password link.";; esac ;;
     GITHUB_REPO) echo "$val" | grep -Eq '^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$' || die "\"$val\" is not a repository name." "Use owner/name, for example your-company/website." ;;
-    *) die "Unknown answer \"$key\"." "Use one of: DOMAIN, OWNER_EMAIL, COMPANY, DESIGN, RELEASE, INSTANCE, WEB_SERVER, JOBS, OWNER_LINK, GITHUB_REPO." ;;
+    *) die "Unknown answer \"$key\"." "Use one of: TARGET, PUBLISH, DOMAIN, OWNER_EMAIL, COMPANY, DESIGN, RELEASE, INSTANCE, WEB_SERVER, JOBS, OWNER_LINK, GITHUB_REPO." ;;
   esac
   mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"; touch "$ANSWERS"; chmod 600 "$ANSWERS"
   grep -v "^$key=" "$ANSWERS" > "$ANSWERS.tmp" || true
   printf '%s=%q\n' "$key" "$val" >> "$ANSWERS.tmp"; chmod 600 "$ANSWERS.tmp"; mv "$ANSWERS.tmp" "$ANSWERS"
-  # A new answer after consent changes the plan, so the person has to agree again.
-  [ "$key" != GITHUB_REPO ] && [ -f "$CONSENT" ] && rm -f "$CONSENT" && say "The plan changed, so the earlier yes no longer counts. Show the plan again."
+  # A new answer after consent changes the plan, so the person has to agree again. PUBLISH is chosen after the first page
+  # (and can change later in the chat with Aurelius); publishing itself asks for its own yes.
+  [ "$key" != GITHUB_REPO ] && [ "$key" != PUBLISH ] && [ -f "$CONSENT" ] && rm -f "$CONSENT" && say "The plan changed, so the earlier yes no longer counts. Show the plan again."
   say "Saved $key."
+}
+
+plan_local() {
+  local missing=()
+  [ -n "$OWNER_EMAIL" ] || missing+=(OWNER_EMAIL); [ -n "$COMPANY" ] || missing+=(COMPANY)
+  [ ${#missing[@]} -eq 0 ] || die "Missing answers: ${missing[*]}." "Ask the person and save each with ./gildsite-install answer KEY VALUE."
+  cat <<LOCALPLAN
+PLAN (nothing has been changed yet)
+
+Where:    this computer ($(computer_name))
+Panel:    on this computer, in Docker (the address is shown at the end, like http://127.0.0.1:4450/admin)
+Website:  only a preview on this computer, until the person chooses where to publish it
+Address:  ${DOMAIN:-not chosen yet (needed only when publishing)}
+Owner:    $OWNER_EMAIL
+Company:  $COMPANY
+
+What will happen on this computer:
+  1. Check that Docker runs. The installer does not install Docker on a computer; the person does it with the guide
+     (./gildsite-install docker-help).
+  2. Keep the installer's files in the folder $GILDSITE_HOME.
+  3. $( [ -n "${GILDSITE_SOURCE:-}" ] && echo "Take the Gildsite code from the local copy ${GILDSITE_SOURCE}." || echo "Download Gildsite release \"$RELEASE\" from GitHub." )
+  4. Start in Docker: panel, database, search, Aurelius engine, and the website as a preview.
+  5. Create the owner account for $OWNER_EMAIL.
+  Installer $VERSION does part 1 and stops there: parts 2 to 5 on a computer come with the next installer version.
+
+What will NOT happen:
+  - Nothing goes on the internet: no DNS, no ports open to other computers (everything listens on 127.0.0.1 only).
+  - No other programs on this computer are changed or stopped.
+  - No passwords or keys are shown in the chat; they are stored in files only this account can read.
+
+Later, after the first page: where to publish the website (answer PUBLISH server or cloudflare${PUBLISH:+, now: $PUBLISH}).
+The person can change that choice later in the chat with Aurelius.
+LOCALPLAN
 }
 
 cmd_plan() {
   load_answers
+  [ "$TARGET" = local ] && { plan_local; return; }
   local missing=()
   [ -n "$DOMAIN" ] || missing+=(DOMAIN); [ -n "$OWNER_EMAIL" ] || missing+=(OWNER_EMAIL); [ -n "$COMPANY" ] || missing+=(COMPANY)
   [ ${#missing[@]} -eq 0 ] || die "Missing answers: ${missing[*]}." "Ask the person and save each with ./gildsite-install answer KEY VALUE."
@@ -144,12 +310,18 @@ cmd_consent() {
   [ "${1:-}" = yes ] || die "Consent must be given as: consent yes" "Only run this after the person clearly said yes to the plan."
   cmd_plan >/dev/null
   mkdir -p "$STATE_DIR"; chmod 700 "$STATE_DIR"
-  { date -u +%FT%TZ; sha256sum "$ANSWERS" | cut -d' ' -f1; } > "$CONSENT"
-  say "Consent recorded. Next: ./gildsite-install dns"
+  { date -u +%FT%TZ; { sha256sum "$ANSWERS" 2>/dev/null || shasum -a 256 "$ANSWERS"; } | cut -d" " -f1; } > "$CONSENT"
+  load_answers
+  if [ "$TARGET" = local ]; then say "Consent recorded. Next: ./gildsite-install run"; else say "Consent recorded. Next: ./gildsite-install dns"; fi
 }
 
 cmd_dns() {
   load_answers
+  if [ "$TARGET" = local ]; then
+    say "Nothing to add: on a computer the website is only a preview, so no DNS record is needed now."
+    say "The address matters when publishing (answer PUBLISH). Next: ./gildsite-install run"
+    return 0
+  fi
   [ -n "$DOMAIN" ] || die "No website address yet." "Run ./gildsite-install answer DOMAIN <address> first."
   local ip; ip=$(public_ip)
   [ -n "$ip" ] || die "Could not find this server's public address." "Ask the person for the server's IP address (it is in their hosting panel)."
@@ -413,8 +585,32 @@ updates_home() {
   sudo_ systemctl daemon-reload
 }
 
+# On a computer: Docker is checked, never installed (the person installs Docker Desktop with the guide).
+run_local() {
+  [ -n "$OWNER_EMAIL" ] && [ -n "$COMPANY" ] || die "Answers are missing." "Run ./gildsite-install plan."
+  mkdir -p "$STATE_DIR"; touch "$LOG"; chmod 600 "$LOG"
+  say "Gildsite on this computer. Details go to $LOG. Progress card: ./gildsite-install progress"
+  ACTIVITY_ON=1; progress_set running 1 "starting"
+  step "1/7 Docker on this computer"
+  case "$(docker_state)" in
+    running) ;;
+    missing) die "Docker is not installed on this computer." "Run ./gildsite-install docker-help and guide the person step by step, then run again." ;;
+    no-access) die "Docker is installed, but this account may not use it." "Run ./gildsite-install docker-help (part \"no access\"), then run again." ;;
+    *) die "Docker is installed but not running." "Ask the person to start Docker Desktop (or Docker), wait a minute, then run again." ;;
+  esac
+  local m; m=$(docker_mem_gb)
+  [ -z "$m" ] || [ "$m" -ge "$MIN_RAM_GB" ] || die "Docker may use only $m GB of memory, needs $MIN_RAM_GB GB." "Docker Desktop: Settings, Resources, Memory at least $MIN_RAM_GB GB, Apply & restart; then run again."
+  ok "Docker is running${m:+ ($m GB of memory for Docker)}"
+  mark_done docker
+  # The template's own script (nowy-klient.sh) still creates instances only in /srv/klienci on a Linux server.
+  die "Installer $VERSION checks the computer and Docker; installing Gildsite on a computer comes with the next installer version." \
+      "Tell the person the computer is ready and the answers are saved; nothing else was changed. Run ./gildsite-install run again with the next installer version." 3
+}
+
 cmd_run() {
   need_consent; load_answers
+  # shellcheck disable=SC2317 # run_local stops on its own (die) in this version; return keeps the server path below untouched
+  [ "$TARGET" = local ] && { run_local; return; }
   [ -n "$DOMAIN" ] && [ -n "$OWNER_EMAIL" ] && [ -n "$COMPANY" ] || die "Answers are missing." "Run ./gildsite-install plan."
   is_done dns || [ -n "${GILDSITE_SKIP_DNS:-}" ] || die "The website address does not point to this server yet." "Run ./gildsite-install dns and wait until it says DNS READY."
   mkdir -p "$STATE_DIR"; touch "$LOG"; chmod 600 "$LOG"
@@ -596,9 +792,11 @@ progress_data() { # fills the P_* and C_* variables the three formats print
   load_answers; P_STATE=idle; P_STEP=0; P_MSG=""; P_AT=0; [ -f "$PROGRESS" ] && . "$PROGRESS"
   C_ITEMS=(); local n=0 s
   add() { C_ITEMS+=("$1|$2|$3"); }
-  [ -n "$DOMAIN" ] && [ -n "$OWNER_EMAIL" ] && [ -n "$COMPANY" ] && s=done || s=todo; add "Your answers" "$s" "Address, owner e-mail, company"
+  { [ -n "$DOMAIN" ] || [ "$TARGET" = local ]; } && [ -n "$OWNER_EMAIL" ] && [ -n "$COMPANY" ] && s=done || s=todo; add "Your answers" "$s" "Address, owner e-mail, company"
   [ -f "$CONSENT" ] && s=done || s=todo; add "Your yes to the plan" "$s" ""
-  { is_done dns || [ -n "${GILDSITE_SKIP_DNS:-}" ]; } && s=done || s=todo; add "Address points to this server" "$s" "${DOMAIN}"
+  # On a computer there is no DNS step; Docker is the first part of run.
+  if [ "$TARGET" != local ]; then { is_done dns || [ -n "${GILDSITE_SKIP_DNS:-}" ]; } && s=done || s=todo; add "Address points to this server" "$s" "${DOMAIN}"; fi
+  C_WHERE=Server; [ "$TARGET" = local ] && { C_WHERE=Computer; RUN_STEPS[5]="Preview on this computer"; }
   local i
   for i in "${!RUN_STEPS[@]}"; do
     if { [ "$P_STATE" != running ] && [ "$P_STATE" != failed ] && is_done run; } || { [ "$P_STATE" != idle ] && [ "$P_STEP" -gt $((i+1)) ]; }; then s=done
@@ -613,17 +811,22 @@ progress_data() { # fills the P_* and C_* variables the three formats print
   for s in "${C_ITEMS[@]}"; do case "$s" in *"|done|"*) C_DONE=$((C_DONE+1));; *"|now|"*|*"|failed|"*) [ -n "$C_NOW" ] || C_NOW="${s%%|*}";; esac; done
   C_PCT=$(( C_DONE * 100 / C_TOTAL ))
   C_LEFT=0; if [ "$P_STATE" = running ] || ! is_done run; then for i in "${!RUN_MIN[@]}"; do [ "$P_STEP" -le $((i+1)) ] && C_LEFT=$((C_LEFT + RUN_MIN[i])); done; fi
-  local mt ma; mt=$(awk '/MemTotal/{print $2}' /proc/meminfo); ma=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
+  local mt ma
+  if [ -r /proc/meminfo ]; then mt=$(awk '/MemTotal/{print $2}' /proc/meminfo); ma=$(awk '/MemAvailable/{print $2}' /proc/meminfo)
+  else mt=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 1024) / 1024 )); ma=$(( $(free_ram_gb) * 1048576 )); fi # a Mac
   C_RAM_USED=$(awk -v t="$mt" -v a="$ma" 'BEGIN{printf "%.1f", (t-a)/1048576}'); C_RAM_TOTAL=$(awk -v t="$mt" 'BEGIN{printf "%.0f", t/1048576}')
-  C_RAM_PCT=$(( (mt-ma) * 100 / mt ))
+  C_RAM_PCT=$(( (mt-ma) * 100 / (mt > 0 ? mt : 1) ))
   local p="$GILDSITE_HOME"; while [ ! -d "$p" ]; do p=$(dirname "$p"); done
-  read -r C_DISK_TOTAL C_DISK_USED < <(df -BG --output=size,used "$p" | tail -1 | tr -d G)
+  if [ "$TARGET" = local ]; then read -r C_DISK_TOTAL C_DISK_USED < <(df -Pk "$p" | awk 'NR==2 {printf "%d %d\n", $2/1048576, $3/1048576}')
+  else read -r C_DISK_TOTAL C_DISK_USED < <(df -BG --output=size,used "$p" | tail -1 | tr -d G); fi
   C_DISK_PCT=$(( C_DISK_USED * 100 / (C_DISK_TOTAL > 0 ? C_DISK_TOTAL : 1) ))
-  if is_done run; then [ "$WEB_SERVER" = existing ] && C_HTTPS="set up by the server admin" || C_HTTPS="on (Caddy)"; else C_HTTPS="not yet"; fi
-  C_LAST=(); [ -f "$ACTIVITY" ] && mapfile -t C_LAST < <(tail -3 "$ACTIVITY")
+  if [ "$TARGET" = local ]; then C_HTTPS="not needed (preview on this computer)"
+  elif is_done run; then [ "$WEB_SERVER" = existing ] && C_HTTPS="set up by the server admin" || C_HTTPS="on (Caddy)"; else C_HTTPS="not yet"; fi
+  C_LAST=(); [ -f "$ACTIVITY" ] && { local l; while IFS= read -r l; do C_LAST+=("$l"); done < <(tail -3 "$ACTIVITY"); } # no mapfile: a Mac has bash 3.2
   if [ "$P_STATE" = failed ]; then C_MOVE="Something stopped: ${P_MSG}. I will explain what to do."
-  elif [ -z "$DOMAIN" ] || [ -z "$OWNER_EMAIL" ] || [ -z "$COMPANY" ]; then C_MOVE="Answer three short questions in the chat."
+  elif { [ -z "$DOMAIN" ] && [ "$TARGET" != local ]; } || [ -z "$OWNER_EMAIL" ] || [ -z "$COMPANY" ]; then C_MOVE="Answer three short questions in the chat."
   elif [ ! -f "$CONSENT" ]; then C_MOVE="Read the plan and say yes or no."
+  elif [ "$TARGET" = local ] && ! is_done docker; then C_MOVE="Install or start Docker on this computer (the chat guides you step by step)."
   elif ! is_done dns && [ -z "${GILDSITE_SKIP_DNS:-}" ]; then C_MOVE="Add one DNS record at your domain provider (see the chat)."
   elif [ "$P_STATE" = running ]; then C_MOVE="Nothing. You can close this; I will write when it is done."
   elif is_done finish; then C_MOVE="Open your one-time login link and set a password."
@@ -643,7 +846,7 @@ progress_text() {
     case "$st" in done) mark="[x]";; now) mark="[>]";; failed) mark="[!]";; *) mark="[ ]";; esac
     printf ' %s %2d. %s%s\n' "$mark" "$i" "$name" "$( [ "$st" = now ] && echo '  (working now)' )"; i=$((i+1))
   done
-  printf '\nServer   memory %s of %s GB  ·  disk %s of %s GB  ·  HTTPS %s\n' "$C_RAM_USED" "$C_RAM_TOTAL" "$C_DISK_USED" "$C_DISK_TOTAL" "$C_HTTPS"
+  printf '\n%-8s memory %s of %s GB  ·  disk %s of %s GB  ·  HTTPS %s\n' "$C_WHERE" "$C_RAM_USED" "$C_RAM_TOTAL" "$C_DISK_USED" "$C_DISK_TOTAL" "$C_HTTPS"
   if [ ${#C_LAST[@]} -gt 0 ]; then printf 'Lately\n'; for s in "${C_LAST[@]}"; do IFS='|' read -r i st det <<< "$s"; printf '  %s  %s\n' "$i" "$det"; done; fi
   printf 'Your move: %s\n' "$C_MOVE"
 }
@@ -657,7 +860,7 @@ progress_html() { # fragment for chat widgets; colours only through the chat's o
     IFS='|' read -r name st det <<< "$s"
     rows+="<li class='$st'><span class='ic'>$( case "$st" in done) echo '&#10003;';; failed) echo '!';; now) echo '';; *) echo "$i";; esac )</span><span>$(esc "$name")$( [ "$st" = now ] && echo " <em>working now</em>" || true )</span></li>"; i=$((i+1))
   done
-  for s in "${C_LAST[@]}"; do IFS='|' read -r i st det <<< "$s"; last+="<div><span class='mu'>$(esc "$i")</span> $(esc "$det")</div>"; done
+  [ ${#C_LAST[@]} -eq 0 ] || for s in "${C_LAST[@]}"; do IFS='|' read -r i st det <<< "$s"; last+="<div><span class='mu'>$(esc "$i")</span> $(esc "$det")</div>"; done
   cat <<HTML
 <style>.gp{font:14px/1.45 system-ui,sans-serif;color:var(--text-primary);background:var(--surface-1);border:1px solid var(--border);border-radius:14px;padding:16px;max-width:620px}
 .gp h3{margin:0;font-size:15px}.gp .mu{color:var(--text-secondary);font-size:12px}.gp .bar{height:8px;border-radius:99px;background:var(--border);margin:12px 0 4px;overflow:hidden}
@@ -672,7 +875,7 @@ progress_html() { # fragment for chat widgets; colours only through the chat's o
 <div class='gp'><h3>$(esc "$head")</h3><div class='mu'>$(esc "${DOMAIN:-address not set}")$( [ "$C_AGO" -ge 0 ] && echo " · updated ${C_AGO}s ago" )</div>
 <div class='bar'><i style='width:${C_PCT}%'></i></div><div class='mu'>${C_DONE} of ${C_TOTAL} done · ${C_PCT}%$( [ "$C_LEFT" -gt 0 ] && [ "$P_STATE" = running ] && echo " · about ${C_LEFT} min left" )</div>
 <div class='cols'><ol>${rows}</ol><div>
-<div class='box'><div class='lab'>Server</div>Memory ${C_RAM_USED} of ${C_RAM_TOTAL} GB<div class='bar'><i style='width:${C_RAM_PCT}%'></i></div>Disk ${C_DISK_USED} of ${C_DISK_TOTAL} GB<div class='bar'><i style='width:${C_DISK_PCT}%'></i></div>HTTPS: $(esc "$C_HTTPS")</div>
+<div class='box'><div class='lab'>$(esc "$C_WHERE")</div>Memory ${C_RAM_USED} of ${C_RAM_TOTAL} GB<div class='bar'><i style='width:${C_RAM_PCT}%'></i></div>Disk ${C_DISK_USED} of ${C_DISK_TOTAL} GB<div class='bar'><i style='width:${C_DISK_PCT}%'></i></div>HTTPS: $(esc "$C_HTTPS")</div>
 $( [ -n "$last" ] && echo "<div class='box'><div class='lab'>Lately</div>${last}</div>" )
 <div class='box'><div class='lab'>Your move</div><span class='mv'>$(esc "$C_MOVE")</span></div></div></div></div>
 HTML
@@ -700,8 +903,9 @@ cmd_status() {
     name=${s%%|*}; desc=${s#*|}; mark="[ ]"
     case "$name" in
       check)   ( cmd_check >/dev/null 2>&1 ) && mark="[x]" ;;
-      answers) [ -n "$DOMAIN" ] && [ -n "$OWNER_EMAIL" ] && [ -n "$COMPANY" ] && mark="[x]" ;;
+      answers) { [ -n "$DOMAIN" ] || [ "$TARGET" = local ]; } && [ -n "$OWNER_EMAIL" ] && [ -n "$COMPANY" ] && mark="[x]" ;;
       consent) [ -f "$CONSENT" ] && mark="[x]" ;;
+      dns)     if [ "$TARGET" = local ]; then mark="[-]"; desc="$desc (not needed on a computer)"; elif is_done dns; then mark="[x]"; fi ;;
       *)       is_done "$name" && mark="[x]" ;;
     esac
     printf '  %s %d. %s\n' "$mark" "$i" "$desc"; i=$((i+1))
@@ -712,9 +916,11 @@ usage() {
   cat <<USE
 Gildsite installer $VERSION. Read INSTALL-FOR-AI.md first.
 
-  check [--json]        look at the server (read-only)
-  answer KEY VALUE      save DOMAIN, OWNER_EMAIL, COMPANY (also DESIGN on|off, RELEASE, INSTANCE, WEB_SERVER,
-                        JOBS backup,knowledge,updates|none, OWNER_LINK yes|no, GITHUB_REPO)
+  check [--json]        look at the server or computer (read-only)
+  docker-help           step-by-step Docker guide for this computer (read-only)
+  answer KEY VALUE      save TARGET server|local, DOMAIN, OWNER_EMAIL, COMPANY (also PUBLISH server|cloudflare,
+                        DESIGN on|off, RELEASE, INSTANCE, WEB_SERVER, JOBS backup,knowledge,updates|none,
+                        OWNER_LINK yes|no, GITHUB_REPO)
   plan                  show what will happen (read-only)
   consent yes           record the person's yes (only after they said it)
   dns                   show DNS records and check them (read-only)
@@ -730,6 +936,7 @@ USE
 
 case "${1:-}" in
   check)    shift; cmd_check "${1:-}" ;;
+  docker-help) cmd_docker_help ;;
   answer)   shift; cmd_answer "${1:-}" "${2:-}" ;;
   plan)     cmd_plan ;;
   consent)  shift; cmd_consent "${1:-}" ;;

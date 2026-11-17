@@ -19,6 +19,9 @@ About 10 minutes of your time. The installation itself takes 15–25 minutes.
 
 - A server with Ubuntu or Debian, at least 8 GB of memory and 30 GB of free disk.
 - A domain name you can edit (to add one DNS record).
+- Or your own computer instead of a server: a Mac, Windows with WSL or Linux, with Docker and 8 GB of free memory.
+  The AI checks the computer and guides you through Docker step by step. The website stays a preview on your computer
+  until you choose where to publish it (a server or Cloudflare).
 - Optional: a GitHub account, if you want feedback and code changes to go there.
 
 ## Safety
@@ -27,4 +30,4 @@ About 10 minutes of your time. The installation itself takes 15–25 minutes.
 - Passwords and keys are stored only in files on the server, never shown in the chat.
 - Other programs on the server are not touched.
 
-Status: version 0.6.0. Installing the website and panel works, installs the newest release, turns on updates from the panel, with a live progress card for the chat (tested on a clean machine and on a server that already runs nginx). Connecting Aurelius (Claude Code, Codex) works and needs Gildsite 9cbf11d or newer. Connecting GitHub uses a device login and still has to be tried on a real server.
+Status: version 0.9.0 (changes: CHANGELOG.md). The first question is now where Gildsite runs: a server (as before) or your own computer. On a computer the installer checks it and Docker; installing Gildsite there comes with the next version. On a server: installing the website and panel works, installs the newest release, turns on updates from the panel, with a live progress card for the chat (tested on a clean machine and on a server that already runs nginx). Connecting Aurelius (Claude Code, Codex) works and needs Gildsite 9cbf11d or newer. Connecting GitHub uses a device login and still has to be tried on a real server.
