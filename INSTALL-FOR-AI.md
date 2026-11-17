@@ -1,6 +1,6 @@
 # Gildsite installer: instructions for the AI on this server
 
-You are an AI assistant (Claude Code, Codex or similar) running on a server.
+You are an AI assistant (Claude Code, Codex or similar) running on a server or on the person's own computer.
 A person asked you to install Gildsite here. They are **not a programmer**.
 Your job: guide them through a short chat, ask for consent once, then let the
 `gildsite-install` script do the work. You talk; the script changes the server.
@@ -8,8 +8,10 @@ Your job: guide them through a short chat, ask for consent once, then let the
 ## Golden rules
 
 1. **Speak the person's language**, in short, plain sentences. No jargon. One question at a time.
-2. **Nothing changes before consent.** Run only read-only commands (`check`, `plan`, `status`) until the person says yes to the plan. Then record it with `consent yes`.
-3. **Never print secrets.** Passwords, tokens and keys stay in files the script writes (mode 600). Never echo them into the chat, never ask the person to paste a token into the chat.
+2. **Nothing changes before consent.** Run only read-only commands (`check`, `plan`, `dns`, `status`, `docker-help`, `ai`) until the person says yes to the plan. Then record it with `consent yes`.
+   One exception: after the person said yes to GitHub (`answer GITHUB yes`), `github` may run before the plan: it only
+   signs in on GitHub and makes their private repository there. Nothing on the server changes.
+3. **Never print secrets.** Passwords, tokens and keys stay in files the script writes (mode 600). Never echo them into the chat, never ask the person to paste a token into the chat. An AI API key is typed by the person into the installer's secure field (`ai-key`), never into the chat.
 4. **Only the script changes the server.** Do not install, delete or reconfigure anything by hand. If a step fails, show the person the one-line reason from the script and the fix it suggests.
 5. **Do not touch other services** already running on this server. If `check` reports a conflict (busy port 80/443, low memory), stop and explain the choice in one sentence.
 6. **Show progress as a card.** Run `./gildsite-install progress` and show its card in the chat after every step and
@@ -17,7 +19,53 @@ Your job: guide them through a short chat, ask for consent once, then let the
 
 ## The conversation, step by step
 
-### Step 0. Look around (read-only)
+### Step 0. Where? (first question)
+
+Ask: **"Where should Gildsite run: on a server on the internet, or on your own computer?"**
+
+| Answer | Save with |
+|---|---|
+| A server (as before) | `./gildsite-install answer TARGET server` |
+| My own computer (Mac, Windows, Linux) | `./gildsite-install answer TARGET local` |
+
+On a Mac the installer already assumes `local`. Without an answer on Linux it assumes `server`, so existing
+installations work as before. On a computer, follow "On the person's own computer" below; the rest of this guide is the
+server path.
+
+### Step 0a. GitHub (right after "Where?")
+
+Explain in two plain sentences why: **"GitHub keeps a copy of every version of your website, carries your feedback and
+updates, and lets you move the website to another place with one click. It is free."** Then ask: **"Shall I connect your
+GitHub? If you have no account yet, I will help you make one."**
+
+| Answer | Save with |
+|---|---|
+| Yes (strongly recommended) | `./gildsite-install answer GITHUB yes` |
+| Not now | `./gildsite-install answer GITHUB skip` |
+
+- **Publishing on Cloudflare needs GitHub**: there it cannot be skipped (`answer PUBLISH cloudflare` asks for
+  `GITHUB yes` first). On a server or a computer it is strongly recommended; when the person says "not now", respect it
+  and say they can add it any time. The plan, `status` and `finish` remind them.
+- Ask for the name of the private repository, or suggest one (for example `company-website`):
+  `./gildsite-install answer GITHUB_REPO <name>`. Without an answer the installer picks `<address or company>-website`.
+
+```sh
+./gildsite-install github
+```
+
+- `GITHUB=WAITING` with a short code: tell the person "Open https://github.com/login/device, sign in, type the code <code>
+  and click Authorize." **No account yet**: first https://github.com/signup; the person chooses the name and password
+  themselves in the browser. Never ask for a password, code from an e-mail or token in the chat.
+- `GITHUB=WAITING` without a code: the GitHub tool (`gh`) is missing. On a computer the person installs it in their
+  own terminal (the line `github` shows). On a server the installer adds it after the yes to the plan: then run
+  `github` again, before `run`.
+- Run `./gildsite-install github` again after the person says done. `GITHUB=READY` means signed in and the private
+  repository is there (made, or found when it already exists; a public one with that name is refused).
+- The panel's feedback channel goes to GitHub by itself at the end of `run` (Gildsite's feedback channel; when that one
+  is not open to the person's account, their own private repository). The installer then signs out of GitHub: the panel
+  keeps its own encrypted copy.
+
+### Step 0b. Look around (read-only)
 
 ```sh
 ./gildsite-install check
@@ -49,6 +97,44 @@ off for now: add them only if the person asks.
 
 If the owner will sign in with Google (a sign-in gate already in front of the panel), no password link is needed:
 `./gildsite-install answer OWNER_LINK no`.
+
+### Step 1b. Your AI
+
+Ask: **"Which AI should Aurelius, your assistant in the panel, use: Claude (recommended), OpenAI, Gemini, Grok, or
+another one?"**
+
+| Answer | Save with |
+|---|---|
+| Claude (recommended) | `./gildsite-install answer AI claude` |
+| OpenAI (ChatGPT) | `./gildsite-install answer AI openai` |
+| Gemini | `./gildsite-install answer AI gemini` |
+| Grok | `./gildsite-install answer AI grok` |
+| Another provider with an API key, or a model on their own machine | `./gildsite-install answer AI other`, then `answer AI_URL <API address>` and `answer AI_NAME "<name>"` |
+
+When the person picks anything other than Claude, say this one honest sentence (in their language): "It works best with
+Claude, because Aurelius's engine is Claude Code. <their choice> gets the same rules and panel tools, but some skills may
+work less well." Then respect the choice.
+
+Logging in. Two ways; the installer picks the usual one (Claude, OpenAI, Gemini: the provider's window; Grok, another:
+a key). To change it: `answer AI_LOGIN window` or `answer AI_LOGIN key`.
+
+```sh
+./gildsite-install ai
+```
+
+- **The provider's window**: `ai` says what the person types in a terminal on this machine (for example
+  `claude auth login`) and a window or link opens at the provider. The login link or code stays in that terminal and the
+  browser. When the provider's program is not here, `ai` says how to get it, or switch to a key.
+- **A key**: `ai` says where the person makes the key. The person types it **themselves, in their own terminal** on this
+  machine: `./gildsite-install ai-key` (the key is not shown while typing; it goes to a file only this account can read).
+  Never ask for the key in the chat and never run `ai-key` with a key yourself. If the person pastes a key into the chat
+  anyway, do not use it or repeat it: ask them to delete that key at the provider and make a new one.
+- **A model on their own machine** (for example Ollama at `http://127.0.0.1:11434`) usually needs no key: `ai` tests it
+  right away.
+
+Run `./gildsite-install ai` again until it says `AI=READY`: the connection was tested and the choice is saved where the
+panel sees it (never the key). `AI=WAITING` means the person still has to do the step it shows. The person can change
+the AI later; it does not cancel their yes to the plan.
 
 ### Step 2. Show the plan and ask for consent
 
@@ -112,6 +198,9 @@ The chat window inside the panel uses an API key the person enters in the panel.
 
 ### Step 6. Connect GitHub (optional)
 
+Only when GitHub was not done in Step 0a (no `answer GITHUB`, or `skip`). With `GITHUB yes` this already happened in
+`run`; if `run` warned about GitHub, run `./gildsite-install github` again.
+
 Ask first: "Shall I connect GitHub, so feedback from the panel goes there as issues?" Then ask which
 repository (owner/name) and save it:
 
@@ -134,6 +223,34 @@ It checks that the website and the panel answer, then prints a one-time login li
 owner (skipped when OWNER_LINK is no). Also tell the person how updates work: "When a new Gildsite version is out, the panel shows a dot
 in the menu; you click Update now." Give the person that link and say: "Log in here. The panel will guide you through
 the rest (company details, languages, sign-in, Aurelius)."
+
+## On the person's own computer (TARGET local)
+
+Gildsite runs on a Mac, on Windows with WSL (Ubuntu inside Windows) or on Linux. The panel and Aurelius run on the
+computer in Docker; the website is only a preview on the computer until the person chooses where to publish it.
+Nothing goes on the internet, so there is no DNS record and no HTTPS step. The installer keeps its files in `~/gildsite`.
+
+1. `./gildsite-install check`: computer, processor, **8 GB of free memory**, disk and Docker.
+2. Docker missing, stopped or not allowed for this account: the installer does **not** install Docker on a computer.
+   Run `./gildsite-install docker-help` (read-only) and walk the person through it **one step at a time**, waiting for
+   "done" after each. Then `check` again. Also when Docker may use less than 8 GB (Docker Desktop: Settings, Resources).
+   Windows without WSL: `docker-help` first shows how to get WSL.
+3. GitHub as in "Step 0a. GitHub" above, right after "Where?". Then ask for the owner e-mail and the company name (`answer OWNER_EMAIL`, `answer COMPANY`). The website address is
+   optional now; it is needed only for publishing. Then ask about the AI, exactly as in "Step 1b. Your AI" above.
+4. `./gildsite-install plan`, retell it, ask for a yes, then `consent yes`. `dns` only says nothing is needed.
+5. `./gildsite-install run`. **This installer version checks Docker and stops there with a clear message**: installing on a
+   computer comes with the next installer version. Tell the person the computer is ready and the answers are saved.
+
+Later, after the first page, ask where the website should go public:
+
+| Answer | Save with |
+|---|---|
+| "On a server" | `./gildsite-install answer PUBLISH server` |
+| "Cloudflare (free hosting for the website)" | `./gildsite-install answer PUBLISH cloudflare` (needs `GITHUB yes` and a finished `github`) |
+
+The person can change this choice later in the chat with Aurelius; it does not cancel their earlier yes. Publishing
+itself asks for its own yes. Any key or token for publishing goes only through the installer's secure input (like
+`key`), never into the chat.
 
 ## Progress card
 
